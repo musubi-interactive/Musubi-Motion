@@ -1,5 +1,6 @@
 import { normalizedChannels, uniqueName, type SceneDocument, type TransformChannels, type TransformNode, type Vec3 } from "./scene-document.ts";
 import type { SceneStore } from "./scene-store.ts";
+import { PARTICLE_MAP_PIXELS, validateParticleEmissionMap, validateParticleMapSource, type ParticleEmissionMap } from "./particle-map-emission.ts";
 
 export const MAX_PARTICLE_EMITTERS = 32;
 export const MAX_PARTICLES_PER_EMITTER = 20_000;
@@ -7,6 +8,7 @@ export const MAX_TOTAL_PARTICLES = 100_000;
 export const PARTICLE_STEP_SECONDS = 1 / 120;
 export type ParticleEmission = "omni" | "directional" | "box" | "sphere" | "surface";
 export type ParticleEmitterSettings = {
+  emissionMap?: ParticleEmissionMap;
   enabled: boolean;
   emission: ParticleEmission;
   rate: number;
@@ -55,6 +57,10 @@ export function validateParticleShape(value: unknown): asserts value is Particle
   if (typeof value.enabled !== "boolean" || !["omni", "directional", "box", "sphere", "surface"].includes(value.emission as string)) throw Error("Invalid particle emission mode or enabled setting.");
   if (value.surfaceId !== undefined && !validId(value.surfaceId)) throw Error("Invalid particle surface reference.");
   if (value.emission === "surface" && value.surfaceId === undefined) throw Error("Surface emission requires a polygon mesh source. Create a surface emitter on a selected mesh.");
+  if (value.emissionMap !== undefined) {
+    validateParticleEmissionMap(value.emissionMap);
+    if (value.emission !== "surface") throw Error("Texture emission maps require a mesh surface emitter.");
+  }
   if (!numberIn(value.rate, 0, 10000) || !numberIn(value.lifetime, 0.01, 60)) throw Error("Emission rate must be 0–10,000 per second and lifetime 0.01–60 seconds.");
   if (!numberIn(value.startFrame, -100000, 100000) || !numberIn(value.endFrame, -100000, 100000) || !Number.isInteger(value.startFrame) || !Number.isInteger(value.endFrame) || value.endFrame <= value.startFrame) throw Error("Emission frames must be integers within ±100,000, with end after start.");
   if (!numberIn(value.seed, 0, 0xffffffff) || !Number.isInteger(value.seed)) throw Error("Particle seed must be an unsigned 32-bit integer.");
@@ -72,7 +78,7 @@ export function validateParticleEmitters(doc: SceneDocument): void {
   if (emitters.length > MAX_PARTICLE_EMITTERS) throw Error("A scene supports at most 32 particle emitters.");
   const fps = doc.animation?.fps ?? 24;
   if (!numberIn(fps, 1, 240)) throw Error("Particle emission requires a valid scene FPS between 1 and 240.");
-  let total = 0;
+  let total = 0, decodedPixels = 0;
   for (const shape of emitters) {
     validateParticleShape(shape);
     const parent = doc.nodes[shape.parentId];
@@ -81,6 +87,11 @@ export function validateParticleEmitters(doc: SceneDocument): void {
       const source = doc.nodes[shape.surfaceId];
       if (source?.type !== "meshShape" || doc.nodes[source.parentId]?.type !== "transform") throw Error("Particle surface source must reference an existing polygon mesh shape.");
       if (parent.parentId !== source.parentId) throw Error("A surface emitter must remain parented beneath its source mesh transform.");
+      if (shape.emissionMap) {
+        const program = validateParticleMapSource(doc, shape.emissionMap, source);
+        decodedPixels += program?.images.reduce((sum, asset) => sum + asset.width * asset.height, 0) ?? 0;
+        if (decodedPixels > PARTICLE_MAP_PIXELS) throw Error("Particle emission maps exceed the scene's 8,388,608 decoded pixel budget (32 MiB). Resize map images or disable some texture emitters.");
+      }
     }
     if ((shape.endFrame - shape.startFrame) / fps > 300) throw Error("Particle emission duration cannot exceed 300 seconds at the scene FPS.");
     const potential = potentialParticleCount(shape);
@@ -109,6 +120,7 @@ export function createParticleEmitter(store: SceneStore, emission: ParticleEmiss
 }
 
 const settingsKeys = new Set(Object.keys(defaultParticleSettings()));
+settingsKeys.add("emissionMap");
 export function updateParticleEmitter(store: SceneStore, shapeId: string, patch: ParticleEmitterPatch): void {
   const doc = store.getState().document, shape = doc.nodes[shapeId];
   if (shape?.type !== "particleShape") throw Error("Choose a particle emitter shape.");

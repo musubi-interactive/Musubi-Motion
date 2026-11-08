@@ -3,9 +3,10 @@ import { SplatSkinning, SplatSkinningMode, type SplatMesh } from "@sparkjsdev/sp
 import type { SkinInfluence, SplatShapeNode, Vec3 } from "./scene-document";
 import { createElasticRuntime } from "./elastic-runtime";
 import type { Joint } from "./skeleton";
+import type { SplatTransformRuntime } from "./splat-transform-runtime";
 import { posedSelection } from "./splat-selection";
 import { createSkinWeightLookup, validateSkinWeightCount } from "./skin-weights";
-export function createBinding(mesh: SplatMesh, binding: NonNullable<SplatShapeNode["binding"]>, elasticity?: SplatShapeNode["elasticity"], joints: Joint[] = []) {
+export function createBinding(mesh: SplatMesh, binding: NonNullable<SplatShapeNode["binding"]>, elasticity?: SplatShapeNode["elasticity"], joints: Joint[] = [], componentTransforms?: SplatTransformRuntime) {
  const source = mesh.extSplats ?? mesh.packedSplats;
  if (!source) throw Error("Skin binding requires loaded splat data.");
  const componentCount = source.numSplats;
@@ -14,6 +15,10 @@ export function createBinding(mesh: SplatMesh, binding: NonNullable<SplatShapeNo
  const lookup = createSkinWeightLookup(binding);
  const boneIndices = new Map(binding.jointIds.map((id, index) => [id, index]));
  const skin = new SplatSkinning({mesh, numSplats: componentCount + (elasticity?.budget ?? 0), numBones:binding.jointIds.length, mode:SplatSkinningMode.LINEAR_BLEND});
+ if (componentTransforms) {
+  const applySkin = skin.modifyCov.bind(skin);
+  skin.modifyCov = value => applySkin(componentTransforms.modifier.apply({ covsplat: value }).covsplat);
+ }
  const rests = binding.restMatrices.map(m => new THREE.Matrix4().fromArray(m));
  const inverseRests = rests.map(m => m.clone().invert());
  rests.forEach((_,i)=>skin.setRestMatrix(i,new THREE.Matrix4()));
@@ -24,16 +29,26 @@ export function createBinding(mesh: SplatMesh, binding: NonNullable<SplatShapeNo
   skin.setSplatBones(index,new THREE.Vector4(...indices),new THREE.Vector4(...weights));
  });
  skin.skinTexture.needsUpdate=true; mesh.skinning=skin; mesh.updateGenerator();
- const elastic = elasticity ? createElasticRuntime(mesh,skin,rests,binding.jointIds,joints,elasticity) : undefined;
+ const elastic = elasticity ? createElasticRuntime(mesh,skin,rests,binding.jointIds,joints,elasticity,componentTransforms?.affine) : undefined;
  let transforms=rests.map(()=>new THREE.Matrix4());
  let selection:ReturnType<typeof posedSelection>|undefined, signature="";
  let active: ((index:number)=>boolean) | undefined;
  let disposed=false;
+ let componentVersion=componentTransforms?.value;
  function validateIndex(index:number) {
   if(disposed)throw Error("Skin binding has been disposed.");
   if(!Number.isInteger(index)||index<0||index>=componentCount)throw Error("Choose an original splat component index within this object's range.");
  }
  return { componentCount,
+ getSkinMatrix(index:number):THREE.Matrix4 {
+  validateIndex(index);
+  const matrix=new THREE.Matrix4();matrix.elements.fill(0);
+  for(let k=0;k<4;k++) {
+   const packed=skin.skinData[index*4+k],weight=(packed&255)/255,bone=transforms[packed>>8];
+   if(weight&&bone)for(let j=0;j<16;j++)matrix.elements[j]+=weight*bone.elements[j];
+  }
+  matrix.elements[15]=1;return matrix;
+ },
  setComponentActive(next:typeof active) {
   if (active === next) return;
   active = next; selection = undefined; elastic?.setComponentActive(next);
@@ -57,10 +72,15 @@ export function createBinding(mesh: SplatMesh, binding: NonNullable<SplatShapeNo
    }
    // Match Spark and posedSelection, including independently rounded 8-bit weights.
    matrix.elements[15]=1;
+   const affine=componentTransforms?.affine(index);
+   if(affine)splat.center.applyMatrix4(affine);
    positions.set(splat.center.applyMatrix4(matrix).toArray(),output*3);
   });
   return positions;
  }, update(boneMatrix:(id:string)=>THREE.Matrix4|undefined) {
+  if(componentVersion!==componentTransforms?.value) {
+   componentVersion=componentTransforms?.value;selection=undefined;elastic?.invalidate();
+  }
   mesh.updateWorldMatrix(true,false);
   const inverse = mesh.matrixWorld.clone().invert();
   const currentMatrices = binding.jointIds.map((id,i)=>{ const matrix=boneMatrix(id); return matrix ? (binding.meshSpace ? matrix.clone() : inverse.clone().multiply(matrix)) : rests[i].clone(); });
@@ -77,5 +97,5 @@ export function createBinding(mesh: SplatMesh, binding: NonNullable<SplatShapeNo
   if (bounds.isEmpty()) return result;
   for(const matrix of transforms)result.union(bounds.clone().applyMatrix4(matrix));
   return result;
- }, selection() { return selection??=posedSelection(mesh,skin,transforms,active); }, dispose() { if(disposed)return;disposed=true;elastic?.dispose(); mesh.skinning=null; mesh.updateGenerator(); skin.skinTexture.dispose();skin.boneTexture.dispose(); } };
+ }, selection() { return selection??=posedSelection(mesh,skin,transforms,active,componentTransforms?.affine); }, dispose() { if(disposed)return;disposed=true;elastic?.dispose(); mesh.skinning=null; mesh.updateGenerator(); skin.skinTexture.dispose();skin.boneTexture.dispose(); } };
 }

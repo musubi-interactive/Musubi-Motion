@@ -1,3 +1,4 @@
+import { copyCustomAttributes } from "./custom-attributes.ts";
 import { Euler, MathUtils, Matrix4, Quaternion, Vector3 } from "three";
 import { evaluateSceneAnimation, setKeys, type AnimationPose } from "./animation.ts";
 import { evaluateRigStages, ikChain, jointWorldMatrices } from "./ik.ts";
@@ -78,7 +79,7 @@ export function mirrorJointSubtree(store: SceneStore, rootId: string, options: J
     }
     return next;
   });
-  const next = { ...doc, joints: [...doc.joints ?? [], ...copied] };
+  const next = { ...doc, joints: [...doc.joints ?? [], ...copied], ...(doc.customAttributes ? { customAttributes: copyCustomAttributes(doc, ids) } : {}) };
   validateScene(next);
   store.setState({ document: next, editLabel: "Mirror joint subtree" });
   return ids;

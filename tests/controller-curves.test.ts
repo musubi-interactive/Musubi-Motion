@@ -133,10 +133,10 @@ describe("controller archive integration", () => {
       expect(Object.keys(deleted.assets)).toEqual(Object.keys(doc.assets)); expect(() => validateScene(deleted)).not.toThrow();
     }
   });
-  it("requires exactly one splat or curve shape per transform and valid shape parents", () => {
+  it("allows shapeless groups, limits transforms to one renderable shape and validates shape parents", () => {
     const { store, id, shape } = fixture(), doc = store.getState().document;
-    expect(() => validateScene({ ...doc, nodes: { ...doc.nodes, extra: { ...shape, id: "extra", name: "Extra" } } })).toThrow(/exactly one/);
-    const empty = structuredClone(doc); delete empty.nodes[shape.id]; expect(() => validateScene(empty)).toThrow(/exactly one/);
+    expect(() => validateScene({ ...doc, nodes: { ...doc.nodes, extra: { ...shape, id: "extra", name: "Extra" } } })).toThrow(/at most one/);
+    const empty = structuredClone(doc); delete empty.nodes[shape.id]; expect(() => validateScene(empty)).not.toThrow();
     const orphan = structuredClone(doc); (orphan.nodes[shape.id] as any).parentId = null; expect(() => validateScene(orphan)).toThrow(/no transform/);
     const collision = { ...doc, joints: [{ id: shape.id, name: "Joint", parentId: null, position: [0, 0, 0] }] }; expect(() => validateScene(collision)).toThrow(/collide/);
     expect(doc.nodes[id].type).toBe("transform");

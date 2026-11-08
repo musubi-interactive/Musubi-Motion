@@ -1,7 +1,7 @@
 import type { ComponentPickPoint as Point } from "./component-picking.ts";
 import type { SplatSelectionOperation, SplatSelectionRegion } from "./splat-component-selection.ts";
 
-export type SplatSelectionTool = "box" | "lasso" | "paint";
+export type SplatSelectionTool = "box" | "lasso" | "paint" | "sphere" | "radial";
 export type SplatBrushSettings = { radius: number; spacing: number; operation: SplatSelectionOperation };
 export const MAX_SPLAT_BRUSH_RADIUS = 256;
 const MAX_TRACE_POINTS = 8192;

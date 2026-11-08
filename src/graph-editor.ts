@@ -1,3 +1,6 @@
+import { attributeTypeLabel } from "./custom-attribute-types.ts";
+import { customAttribute } from "./custom-attributes.ts";
+import { channelLabel, isCustomChannel } from "./custom-attributes.ts";
 import type { SceneStore } from "./scene-store.ts";
 import {
   defaultAnimation, evaluateCurve, tangentSlope, upsertTrack, deleteKeys, moveKeys,
@@ -164,10 +167,10 @@ function mountCurveEditors<Clipboard>(store: SceneStore, options: EditorOptions,
   const objectName = (id: string) => {
     const doc = store.getState().document; return doc.nodes[id]?.name ?? doc.joints?.find(j => j.id === id)?.name ?? doc.ikHandles?.find(handle => handle.id === id)?.name ?? id;
   };
-  const channelName = (track: AnimationTrack) => track.channel === "ik.blend" ? "IK blend" : track.channel;
+  const channelName = (track: AnimationTrack) => track.channel === "ik.blend" ? "IK blend" : channelLabel(store.getState().document, track.targetId, track.channel) + (isCustomChannel(track.channel) ? ` (${attributeTypeLabel(customAttribute(store.getState().document, track.targetId, track.channel))})` : "");
   function trackLabel(track: AnimationTrack) {
     const relation = isDriven ? store.getState().document.drivenKeys?.find(item => item.id === track.id) : undefined;
-    return relation ? `${objectName(relation.driver.targetId)}.${relation.driver.channel} → ${objectName(relation.driven.targetId)}.${relation.driven.channel}`
+    return relation ? `${objectName(relation.driver.targetId)}.${channelLabel(store.getState().document, relation.driver.targetId, relation.driver.channel)} → ${objectName(relation.driven.targetId)}.${channelLabel(store.getState().document, relation.driven.targetId, relation.driven.channel)}`
       : `${objectName(track.targetId)} · ${channelName(track)}`;
   }
   function activate(id: string) { if (isDriven && activeTrack !== id) manualCursor = undefined; activeTrack = id; }

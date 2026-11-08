@@ -1,10 +1,12 @@
-import { BufferGeometry, Color as ThreeColor, Float32BufferAttribute, Matrix3, Matrix4, Mesh, MeshBasicMaterial, Quaternion, Triangle, Vector3 } from "three";
+import { BufferGeometry, Color as ThreeColor, Float32BufferAttribute, Matrix3, Matrix4, Mesh, MeshBasicMaterial, Quaternion, Triangle, Vector2, Vector3 } from "three";
 import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
 import { Alpha, Attraction, Color, CurlNoise, Emitter, Force, Life, Mass, Particle, Position, Radius, Rate, Scale, Span, System, Vector3D, type Behaviour } from "three-nebula";
 import { triangulateMesh } from "./mesh-modeling.ts";
-import { MAX_PARTICLES_PER_EMITTER, PARTICLE_STEP_SECONDS, potentialParticleCount, validateParticleShape, type ParticleShapeNode } from "./particle-emitter.ts";
+import { MAX_PARTICLES_PER_EMITTER, PARTICLE_STEP_SECONDS, potentialParticleCount, validateParticleEmitters, validateParticleShape, type ParticleShapeNode } from "./particle-emitter.ts";
 import { createParticlePoseSampler } from "./particle-pose-sampler.ts";
 import type { MeshShapeNode, SceneDocument } from "./scene-document.ts";
+import { decodeParticleMapImages, particleCandidateRandom, particleMapDensity, particleMapProgram, particleMapUV, validateParticleMapSource } from "./particle-map-emission.ts";
+import type { PixelSource } from "./procedural-graph-runtime.ts";
 
 export type ParticleFrame = {
   positions: Float32Array;
@@ -54,6 +56,7 @@ function makeSurface(shape: MeshShapeNode): Surface | undefined {
   const positions = new Float32Array(triangles.indices.length * 3);
   for (let i = 0; i < triangles.indices.length; i++) positions.set(triangles.positions.subarray(triangles.indices[i] * 3, triangles.indices[i] * 3 + 3), i * 3);
   const geometry = new BufferGeometry().setAttribute("position", new Float32BufferAttribute(positions, 3));
+  if (shape.uvs) geometry.setAttribute("uv", new Float32BufferAttribute(triangles.indices.flatMap(index => shape.uvs![triangles.vertexIds[index]]), 2));
   const material = new MeshBasicMaterial();
   return { geometry, material, sampler: new MeshSurfaceSampler(new Mesh(geometry, material)) as SeededSurfaceSampler };
 }
@@ -71,6 +74,8 @@ function sameMetric(a: number[] | undefined, b: number[]): boolean {
 }
 
 class WorldSpawn extends Position {
+  mapped: { point: Vector3; normal: Vector3 }[] = [];
+  mappedIndex = 0;
   readonly world = new Matrix4();
   readonly rotation = new Matrix4();
   readonly normalMatrix = new Matrix3();
@@ -103,7 +108,11 @@ class WorldSpawn extends Position {
       point.setFromSphericalCoords(Math.cbrt(random()), Math.acos(1 - 2 * random()), 2 * Math.PI * random());
       point.multiply(new Vector3(...shape.volume)).multiplyScalar(.5);
     } else if (shape.emission === "surface") {
-      this.surface!.sampler.setRandomGenerator(random).sample(point, axis);
+      if (shape.emissionMap?.enabled) {
+        const sample = this.mapped[this.mappedIndex++];
+        if (!sample) throw Error("Mapped particle spawn schedule is missing.");
+        point.copy(sample.point); axis.copy(sample.normal);
+      } else this.surface!.sampler.setRandomGenerator(random).sample(point, axis);
       axis.applyNormalMatrix(this.normalMatrix);
     }
     point.applyMatrix4(this.world);
@@ -130,7 +139,7 @@ type Engine = { system: System; emitter: Emitter; rate: ScheduledRate; spawn: Wo
  * This deliberate policy makes forward playback and arbitrary seek identical.
  * A new request cancels an older request; cached outputs are copies, not resumable
  * engine snapshots. Create a new simulation after any document/settings edit. */
-export function createParticleSimulation(doc: SceneDocument, shape: ParticleShapeNode, sampler: ParticlePoseSampler = createParticlePoseSampler(doc)): ParticleSimulation {
+export function createParticleSimulation(doc: SceneDocument, shape: ParticleShapeNode, sampler: ParticlePoseSampler = createParticlePoseSampler(doc), imagePixels?: ReadonlyMap<string, PixelSource>): ParticleSimulation {
   validateParticleShape(shape);
   const fps = doc.animation?.fps ?? 24;
   if (!Number.isFinite(fps) || fps < 1 || fps > 240) throw Error("Particle frame rate must be within 1–240.");
@@ -141,6 +150,11 @@ export function createParticleSimulation(doc: SceneDocument, shape: ParticleShap
   if (transform?.type !== "transform") throw Error("Particle emitter transform is missing.");
   const source = shape.emission === "surface" ? doc.nodes[shape.surfaceId!] : undefined;
   if (shape.emission === "surface" && (source?.type !== "meshShape" || transform.parentId !== source.parentId)) throw Error("Surface particles require their original mesh parent.");
+  if (shape.emissionMap && source?.type === "meshShape") validateParticleMapSource(doc, shape.emissionMap, source);
+  const map = shape.emissionMap?.enabled ? shape.emissionMap : undefined;
+  if (map) validateParticleEmitters(doc);
+  const mapProgram = map ? particleMapProgram(doc, map) : undefined;
+  let pixels = imagePixels;
 
   let surface: Surface | undefined;
   let surfacePrepared = false;
@@ -209,6 +223,7 @@ export function createParticleSimulation(doc: SceneDocument, shape: ParticleShap
       };
 
       try {
+        if (mapProgram && !pixels) pixels = await decodeParticleMapImages(mapProgram.images, check);
         if (!surfacePrepared) {
           surface = source?.type === "meshShape" ? makeSurface(source) : undefined;
           surfacePrepared = true;
@@ -225,7 +240,7 @@ export function createParticleSimulation(doc: SceneDocument, shape: ParticleShap
             const value = seconds * shape.rate, rounded = Math.round(value);
             return rounded > 0 && Math.abs(value - rounded) <= 8 * Number.EPSILON * Math.max(1, value) ? rounded : Math.max(1, Math.ceil(value));
           };
-          const births = countAt(to) - countAt(from);
+          let births = countAt(to) - countAt(from);
           if (active.emitter.particles.length + births > MAX_PARTICLES_PER_EMITTER) throw Error("Particle simulation would exceed 20,000 live particles.");
           if (births > 0) {
             const birthFrame = shape.startFrame + active.step * PARTICLE_STEP_SECONDS * fps;
@@ -254,12 +269,24 @@ export function createParticleSimulation(doc: SceneDocument, shape: ParticleShap
                 surface.metric = metric;
               }
             }
+            if (map && mapProgram && surface) {
+              const accepted: { point: Vector3; normal: Vector3 }[] = [];
+              for (let candidate = countAt(from); candidate < countAt(to); candidate++) {
+                const random = particleCandidateRandom(shape.seed, candidate), point = new Vector3(), normal = new Vector3(), uv = new Vector2();
+                surface.sampler.setRandomGenerator(random).sample(point, normal, undefined, uv);
+                const local = point.toArray() as [number, number, number];
+                const rgba = mapProgram.sample({ uv: particleMapUV(map, local, uv.toArray()), position: local, frame: birthFrame, fps }, pixels);
+                if (random() < particleMapDensity(map, rgba)) accepted.push({ point, normal });
+              }
+              active.spawn.mapped = accepted; active.spawn.mappedIndex = 0; births = accepted.length;
+            }
           }
           check();
           active.rate.pending = births;
           // CPU work happens synchronously; the returned Promise is already
           // resolved. Explicit chunk yields, not microtask awaits, keep UI live.
           void active.system.update(PARTICLE_STEP_SECONDS);
+          active.spawn.mapped = []; active.spawn.mappedIndex = 0;
           active.step++;
           await yieldIfNeeded();
         }
@@ -288,6 +315,7 @@ export function createParticleSimulation(doc: SceneDocument, shape: ParticleShap
       disposed = true; generation++;
       releaseEngine(); outputs.clear();
       surface?.geometry.dispose(); surface?.material.dispose(); surface = undefined;
+      pixels = undefined;
     },
   };
 }

@@ -1,3 +1,5 @@
+import { isDiscreteAttribute, validDiscreteValue } from "./custom-attribute-types.ts";
+import { attributesFor, customAttribute, customChannel, isCustomChannel, boundedAttributeValue, type CustomChannel } from "./custom-attributes.ts";
 import { CubicBezierCurve, Vector2 } from "three";
 import { validateParticleEmitters } from "./particle-emitter.ts";
 import type { SceneDocument, TransformChannels } from "./scene-document.ts";
@@ -9,7 +11,7 @@ export const POSE_ANIMATION_CHANNELS = [
 ] as const;
 export const ANIMATION_CHANNELS = [...POSE_ANIMATION_CHANNELS, "ik.blend"] as const;
 export type PoseAnimationChannel = typeof POSE_ANIMATION_CHANNELS[number];
-export type AnimationChannel = typeof ANIMATION_CHANNELS[number] | `morph.${number}`;
+export type AnimationChannel = typeof ANIMATION_CHANNELS[number] | `morph.${number}` | CustomChannel;
 export type CurveKey = {
   id: string;
   time: number;
@@ -27,8 +29,8 @@ export type AnimationTrack = { id: string; targetId: string; channel: AnimationC
 export type LayerWeightTrack = { id: string; keys: CurveKey[] };
 export type AnimationLayer = { weightTrack?: LayerWeightTrack; id: string; name: string; mode: "additive" | "override"; weight: number; mute: boolean; solo: boolean; locked: boolean };
 export type AnimationData = { fps: number; start: number; end: number; loop: boolean; tracks: AnimationTrack[]; layers?: AnimationLayer[]; activeLayerId?: string };
-export type AnimationPose = TransformChannels & { visibility: number; morphWeights?: number[] };
-export const isAnimationChannel = (channel: string): channel is AnimationChannel => (ANIMATION_CHANNELS as readonly string[]).includes(channel) || /^morph\.(0|[1-9][0-9]{0,2})$/.test(channel);
+export type AnimationPose = TransformChannels & { visibility: number; morphWeights?: number[]; customValues?: Record<string, number> };
+export const isAnimationChannel = (channel: string): channel is AnimationChannel => (ANIMATION_CHANNELS as readonly string[]).includes(channel) || isCustomChannel(channel) || /^morph\.(0|[1-9][0-9]{0,2})$/.test(channel);
 const morphDefaultsCache = new WeakMap<SceneDocument, ReadonlyMap<string, import("./scene-document.ts").MeshShapeNode>>();
 function morphDefaults(doc: SceneDocument, id: string) {
   let shapes = morphDefaultsCache.get(doc);
@@ -107,15 +109,18 @@ export function validateAnimation(value: unknown, doc: SceneDocument): asserts v
     if (!record(track) || !validId(track.id) || trackIds.has(track.id) || !validId(track.targetId)
       || !isAnimationChannel(track.channel as string)) throw Error("Invalid animation track.");
     if ((track.channel as string).startsWith("morph.") && !morphDefaults(doc, track.targetId)?.morphTargets?.[Number((track.channel as string).slice(6))]) throw Error("Morph animation target is missing.");
+    if (isCustomChannel(track.channel as string) && !customAttribute(doc, track.targetId, track.channel as string)?.keyable) throw Error("Custom animation attribute is missing or not keyable.");
     const node = doc.nodes[track.targetId], joint = joints.get(track.targetId), handle = handles.get(track.targetId);
     if (node?.type !== "transform" && !joint && !handle) throw Error("Animation target is missing.");
-    if ((track.channel === "ik.blend") !== !!handle) throw Error("IK blend tracks require an IK handle; pose channels require an object or joint.");
+    if (!isCustomChannel(track.channel as string) && (track.channel === "ik.blend") !== !!handle) throw Error("IK blend tracks require an IK handle; pose channels require an object or joint.");
     if (joint && (track.channel as string).startsWith("scale.")) throw Error("Joint scale animation is not supported.");
     if (track.layerId !== undefined && (!validId(track.layerId) || !layerIds.has(track.layerId))) throw Error("Animation track layer is missing.");
     const channelKey = `${track.targetId}:${track.channel}`, layeredChannel = JSON.stringify([track.layerId ?? null, track.targetId, track.channel]);
     if (channels.has(layeredChannel)) throw Error("Duplicate animated channel in a layer.");
     if (driven.has(channelKey)) throw Error("A channel cannot have both time keys and driven keys.");
     validateCurveKeys(track.keys);
+    const typedAttribute = customAttribute(doc, track.targetId, track.channel as string);
+    if (isDiscreteAttribute(typedAttribute) && track.keys.some(key => key.interpolation !== "step" || !validDiscreteValue(typedAttribute!, key.value))) throw Error("Boolean and Enum time curves require Step interpolation and valid choices.");
     totalKeys += track.keys.length;
     if (totalKeys > 100000) throw Error("Too many animation keys.");
     for (const key of track.keys) {
@@ -210,24 +215,26 @@ export function evaluateCurve(keys: readonly CurveKey[], time: number): number |
   return curve.getPoint(bezierParameter(curve, fraction)).y;
 }
 
-export function readChannel(channels: TransformChannels & { visibility?: number; morphWeights?: number[] }, channel: AnimationChannel): number {
+export function readChannel(channels: TransformChannels & { visibility?: number; morphWeights?: number[]; customValues?: Record<string, number> }, channel: AnimationChannel): number {
   if (channel === "ik.blend") throw Error("IK blend is not a transform pose channel.");
   if (!isAnimationChannel(channel)) throw Error("Unsupported animation channel.");
+  if (isCustomChannel(channel)) return channels.customValues?.[channel.slice(7)] ?? 0;
   if (channel.startsWith("morph.")) return channels.morphWeights?.[Number(channel.slice(6))] ?? 0;
   if (channel === "visibility") return channels.visibility ?? 1;
   const [property, axis] = channel.split(".") as [keyof TransformChannels, string];
   return channels[property]["xyz".indexOf(axis)];
 }
-export function writeChannel(channels: TransformChannels & { visibility?: number; morphWeights?: number[] }, channel: AnimationChannel, value: number): AnimationPose {
+export function writeChannel(channels: TransformChannels & { visibility?: number; morphWeights?: number[]; customValues?: Record<string, number> }, channel: AnimationChannel, value: number): AnimationPose {
   if (!finite(value)) throw Error("Animation values must be finite.");
-  const next: AnimationPose = { position: [...channels.position], rotation: [...channels.rotation], scale: [...channels.scale], visibility: channels.visibility ?? 1, ...(channels.morphWeights ? { morphWeights: [...channels.morphWeights] } : {}) };
+  const next: AnimationPose = { ...(channels.customValues ? { customValues: { ...channels.customValues } } : {}), position: [...channels.position], rotation: [...channels.rotation], scale: [...channels.scale], visibility: channels.visibility ?? 1, ...(channels.morphWeights ? { morphWeights: [...channels.morphWeights] } : {}) };
   applyChannel(next, channel, value);
   return next;
 }
 function applyChannel(next: AnimationPose, channel: AnimationChannel, value: number) {
   if (channel === "ik.blend") throw Error("IK blend is not a transform pose channel.");
   if (!isAnimationChannel(channel)) throw Error("Unsupported animation channel.");
-  if (channel.startsWith("morph.")) { next.morphWeights ??= []; next.morphWeights[Number(channel.slice(6))] = value; }
+  if (isCustomChannel(channel)) { next.customValues ??= {}; next.customValues[channel.slice(7)] = value; }
+  else if (channel.startsWith("morph.")) { next.morphWeights ??= []; next.morphWeights[Number(channel.slice(6))] = value; }
   else if (channel === "visibility") next.visibility = value;
   else {
     const [property, axis] = channel.split(".") as [keyof TransformChannels, string];
@@ -236,8 +243,12 @@ function applyChannel(next: AnimationPose, channel: AnimationChannel, value: num
 }
 export function baseChannels(doc: SceneDocument, id: string): AnimationPose {
   const node = doc.nodes[id], joint = doc.joints?.find(j => j.id === id);
-  if (node?.type !== "transform" && !joint) throw Error("Animation target is missing.");
+  const handle = doc.ikHandles?.find(handle => handle.id === id);
+  if (node?.type !== "transform" && !joint && !handle) throw Error("Animation target is missing.");
+  if (handle && !attributesFor(doc, id).length) throw Error("Animation target is missing.");
+  if (handle) return { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1], visibility: 1, customValues: Object.fromEntries(attributesFor(doc, id).map(item => [item.id, item.value])) };
   return {
+    ...(attributesFor(doc, id).length ? { customValues: Object.fromEntries(attributesFor(doc, id).map(item => [item.id, item.value])) } : {}),
     ...(morphDefaults(doc, id)?.morphTargets ? { morphWeights: morphDefaults(doc, id)!.morphTargets!.map(m => m.weight) } : {}),
     position: [...(node?.type === "transform" ? node.position : joint!.position)],
     rotation: [...(node?.type === "transform" ? node.rotation : joint!.rotation ?? [0, 0, 0])],
@@ -328,7 +339,9 @@ function evaluateHeld(keys: CurveKey[], frame: number): number | undefined {
  * evaluation and exact inverse keying without temporary document mutations. */
 function channelStack(doc: SceneDocument, id: string, channel: AnimationChannel, frame: number, fallback: number, variable = false, weights?: SampledWeights): { offset: number; gain: number } {
   const index = animationIndex(doc.animation), compiled = index.targets.get(id)?.channels.get(channel), active = doc.animation?.activeLayerId;
-  const base = compiled?.base, baseValue = base ? trackValue(base, frame) : undefined;
+  const discrete = isDiscreteAttribute(customAttribute(doc, id, channel));
+  const sample = (track: AnimationTrack) => discrete ? evaluateHeld(track.keys, frame) : trackValue(track, frame);
+  const base = compiled?.base, baseValue = base ? sample(base) : undefined;
   let contributions = compiled?.layers ?? [];
   // Keying a previously absent curve introduces one prospective contribution.
   // This does not mutate the cached plan or any authored scene data.
@@ -338,9 +351,14 @@ function channelStack(doc: SceneDocument, id: string, channel: AnimationChannel,
   let offset = variable && active === undefined ? 0 : baseValue ?? fallback, gain = variable && active === undefined ? 1 : 0;
   for (const { layer, track } of contributions) {
     const isVariable = variable && active === layer.id;
-    const value = track ? trackValue(track, frame) : undefined;
+    const value = track ? sample(track) : undefined;
     if (value === undefined && !isVariable) continue;
-    const w = weights?.get(layer) ?? layer.weight, override = layer.mode === "override" || channel === "visibility";
+    const w = weights?.get(layer) ?? layer.weight;
+    if (discrete) {
+      if (w >= .5) { offset = isVariable ? 0 : value!; gain = isVariable ? 1 : 0; }
+      continue;
+    }
+    const override = layer.mode === "override" || channel === "visibility";
     if (isVariable) {
       if (override) { offset *= 1 - w; gain = w; }
       else if (channel.startsWith("scale.")) { gain = offset * w; offset *= 1 - w; }
@@ -389,8 +407,9 @@ export function evaluateChannels(doc: SceneDocument, id: string, frame: number):
 function sampledChannels(doc: SceneDocument, id: string, frame: number, weights: SampledWeights): AnimationPose {
   const pose = baseChannels(doc, id);
   for (const channel of animationIndex(doc.animation).targets.get(id)?.channels.keys() ?? []) {
+    if (channel === "ik.blend") continue;
     const value = channelStack(doc, id, channel, frame, readChannel(pose, channel), false, weights).offset;
-    applyChannel(pose, channel, effectiveValue(channel, value));
+    applyChannel(pose, channel, isCustomChannel(channel) ? boundedAttributeValue(customAttribute(doc, id, channel)!, value) : effectiveValue(channel, value));
   }
   return pose;
 }
@@ -403,12 +422,14 @@ export function evaluateSceneAnimation(doc: SceneDocument, frame: number): Map<s
     poses.set(node.id, baseChannels(doc, node.id));
   }
   for (const joint of doc.joints ?? []) {
-    poses.set(joint.id, { position: [...joint.position], rotation: [...joint.rotation ?? [0, 0, 0]], scale: [1, 1, 1], visibility: 1 });
+    poses.set(joint.id, baseChannels(doc, joint.id));
   }
+  for (const handle of doc.ikHandles ?? []) if (attributesFor(doc, handle.id).length) poses.set(handle.id, baseChannels(doc, handle.id));
   for (const [id, pose] of poses) {
     for (const channel of animationIndex(doc.animation).targets.get(id)?.channels.keys() ?? []) {
+      if (channel === "ik.blend") continue;
       const value = channelStack(doc, id, channel, frame, readChannel(pose, channel), false, weights).offset;
-      applyChannel(pose, channel, effectiveValue(channel, value));
+      applyChannel(pose, channel, isCustomChannel(channel) ? boundedAttributeValue(customAttribute(doc, id, channel)!, value) : effectiveValue(channel, value));
     }
   }
   return poses;
@@ -426,6 +447,11 @@ function evaluateVisibility(keys: CurveKey[], frame: number): number | undefined
 
 function saveAnimation(store: SceneStore, animation: AnimationData, editLabel: string) {
   const doc = store.getState().document;
+  for (const track of animation.tracks) {
+    const attribute = customAttribute(doc, track.targetId, track.channel);
+    if (attribute?.locked && JSON.stringify(track) !== JSON.stringify(doc.animation?.tracks.find(item => item.id === track.id))) throw Error("Unlock the attribute before editing its curve.");
+  }
+  for (const track of doc.animation?.tracks ?? []) if (customAttribute(doc, track.targetId, track.channel)?.locked && !animation.tracks.some(item => item.id === track.id)) throw Error("Unlock the attribute before deleting its curve.");
   validateAnimation(animation, doc);
   validateParticleEmitters({ ...doc, animation });
   if (JSON.stringify(doc.animation ?? defaultAnimation()) === JSON.stringify(animation)) return;
@@ -434,13 +460,14 @@ function saveAnimation(store: SceneStore, animation: AnimationData, editLabel: s
 export function channelsForTarget(doc: SceneDocument, id: string): AnimationChannel[] {
   const node = doc.nodes[id], joint = doc.joints?.find(joint => joint.id === id), handle = doc.ikHandles?.find(handle => handle.id === id);
   if (handle && (node || joint)) throw Error("IK handle, joint and object IDs must be distinct.");
-  if (handle) return ["ik.blend"];
-  if (node?.type === "transform") return [...POSE_ANIMATION_CHANNELS, ...(morphDefaults(doc, id)?.morphTargets ?? []).map((_, i) => `morph.${i}` as AnimationChannel)];
-  if (joint) return POSE_ANIMATION_CHANNELS.filter(channel => !channel.startsWith("scale."));
+  const custom = attributesFor(doc, id).filter(item => item.keyable).map(customChannel);
+  if (handle) return ["ik.blend", ...custom];
+  if (node?.type === "transform") return [...POSE_ANIMATION_CHANNELS, ...custom, ...(morphDefaults(doc, id)?.morphTargets ?? []).map((_, i) => `morph.${i}` as AnimationChannel)];
+  if (joint) return [...POSE_ANIMATION_CHANNELS.filter(channel => !channel.startsWith("scale.")), ...custom];
   throw Error("Animation target is missing.");
 }
 function targetChannels(doc: SceneDocument, id: string): AnimationChannel[] {
-  return channelsForTarget(doc, id).filter(channel => channel !== "visibility"
+  return channelsForTarget(doc, id).filter(channel => !customAttribute(doc, id, channel)?.locked && channel !== "visibility"
     && !doc.drivenKeys?.some(relation => relation.driven.targetId === id && relation.driven.channel === channel));
 }
 function newKey(time: number, value: number): CurveKey {
@@ -453,7 +480,7 @@ function withKey(track: AnimationTrack, frame: number, value: number): Animation
 }
 
 /** Pure document update so a transform edit and Auto Key share one undo step. */
-export function keyChannels(doc: SceneDocument, id: string, channels: (TransformChannels & { visibility?: number; morphWeights?: number[] }) | number, frame: number, onlyExisting = true): SceneDocument {
+export function keyChannels(doc: SceneDocument, id: string, channels: (TransformChannels & { visibility?: number; morphWeights?: number[]; customValues?: Record<string, number> }) | number, frame: number, onlyExisting = true): SceneDocument {
   if (!finite(frame, 1e6)) throw Error("Invalid key frame.");
   const supported = channelsForTarget(doc, id), isHandle = supported[0] === "ik.blend";
   if (isHandle !== (typeof channels === "number")) throw Error("IK handles require a numeric blend; objects and joints require transform channels.");
@@ -462,7 +489,7 @@ export function keyChannels(doc: SceneDocument, id: string, channels: (Transform
   const weights = sampleLayerWeights(animationIndex(animation), frame);
   let tracks = [...animation.tracks];
   const evaluated = onlyExisting ? (isHandle ? sampledIKBlend(doc, id, frame, weights) : sampledChannels(doc, id, frame, weights)) : undefined;
-  for (const channel of targetChannels(doc, id)) {
+  for (const channel of targetChannels(doc, id).filter(channel => !isCustomChannel(channel))) {
     const index = tracks.findIndex(track => track.targetId === id && track.channel === channel && track.layerId === animation.activeLayerId);
     if (index < 0 && onlyExisting) continue;
     const track = index < 0 ? { id: crypto.randomUUID(), targetId: id, channel, keys: [], ...activeLayerFields(doc) } : tracks[index];
@@ -479,21 +506,24 @@ export function keyChannels(doc: SceneDocument, id: string, channels: (Transform
 }
 
 export function setKeys(store: SceneStore, targetIds: Iterable<string>, frame: number,
-  poses?: ReadonlyMap<string, TransformChannels & { visibility?: number; morphWeights?: number[] }>, channels?: AnimationChannel[]) {
+  poses?: ReadonlyMap<string, TransformChannels & { visibility?: number; morphWeights?: number[]; customValues?: Record<string, number> }>, channels?: AnimationChannel[]) {
   const doc = store.getState().document, animation = doc.animation ?? defaultAnimation();
   if (!finite(frame, 1e6)) throw Error("Invalid key frame.");
   const weights = sampleLayerWeights(animationIndex(animation), frame);
   let tracks = [...animation.tracks];
   for (const targetId of new Set(targetIds)) {
     const supported = channelsForTarget(doc, targetId), isHandle = supported[0] === "ik.blend";
-    const pose = isHandle ? undefined : poses?.get(targetId) ?? sampledChannels(doc, targetId, frame, weights);
+    const pose = isHandle && !attributesFor(doc, targetId).length ? undefined : poses?.get(targetId) ?? sampledChannels(doc, targetId, frame, weights);
     for (const channel of channels ?? targetChannels(doc, targetId)) {
       if (channel.startsWith("scale.") && doc.joints?.some(joint => joint.id === targetId)) throw Error("Joint scale animation is not supported.");
       if (!supported.includes(channel)) throw Error("The selected animation channel is not supported by this target.");
       const index = tracks.findIndex(track => track.targetId === targetId && track.channel === channel && track.layerId === animation.activeLayerId);
       const track = index < 0 ? { id: crypto.randomUUID(), targetId, channel, keys: [], ...activeLayerFields(doc) } : tracks[index];
+      const attribute = customAttribute(doc, targetId, channel);
+      if (attribute?.locked) throw Error("Unlock the attribute before setting keys.");
       const requested = channel === "ik.blend" ? sampledIKBlend(doc, targetId, frame, weights) : readChannel(pose!, channel);
-      const next = withKey(track, frame, keyedLayerValue(doc, targetId, channel, frame, requested, weights));
+      let next = withKey(track, frame, keyedLayerValue(doc, targetId, channel, frame, requested, weights));
+      if (isDiscreteAttribute(attribute)) next = { ...next, keys: next.keys.map(key => ({ ...key, interpolation: "step" })) };
       if (index < 0) tracks.push(next); else tracks[index] = next;
     }
   }

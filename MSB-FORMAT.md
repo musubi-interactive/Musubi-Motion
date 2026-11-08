@@ -1,5 +1,14 @@
 # Musubi scene files (.msb), scene version 2 / container version 1
 
+Splat shapes may carry optional `componentTransforms: { version: 1, sourceCount,
+records: [{ index, matrix }] }`. Records are ordered unique original source IDs;
+`matrix` is a finite invertible column-major affine 4x4 rest edit, applied before
+skinning. The current reader validates version, matrix conditioning, 250,000
+scene-wide records and actual decoded source count before replacing the scene.
+Original asset bytes remain embedded unchanged. Transient selection, component
+pivot, previews and GPU tables are never archived. See
+[component transform workflow](docs/SPLAT-COMPONENT-TRANSFORMS.md).
+
 An `.msb` file is a standard ZIP or ZIP64 archive. New saves use STORE entries assembled as Blob references; legacy compressed ZIPs also remain readable. File > Save uses
 the current file handle where supported. Save As requests a new destination.
 Browsers without the native file picker download a named `.msb` copy instead;
@@ -347,3 +356,15 @@ history, library selection and pending import/replace previews remain transient.
 The scene/container version identifiers remain2/1; no legacy migration is added.
 See [Texture Assets](docs/TEXTURE-ASSETS.md) for bounds, color/data semantics,
 replacement/relink behavior, provenance and the original portable example.
+
+
+## Boolean and Enum custom attributes
+
+Existing optional scene `customAttributes` definitions accept `type: "boolean"`
+or `type: "enum"`; missing/`float` preserves the original numeric representation.
+Boolean values are 0/1. Enum definitions carry ordered `entries: [{id,name,value}]`
+and monotonic `nextValue`. IDs and permanent integer codes remain stable across
+label/order edits; authored time/SDK curves reference those codes, never UI
+ordinals. Codes cannot be reused or renumbered. Entries/labels/limits/defaults,
+Step interpolation and references are validated before publication or open.
+No scene/archive version change. See [typed attribute workflow](docs/CUSTOM-ATTRIBUTE-TYPES.md).

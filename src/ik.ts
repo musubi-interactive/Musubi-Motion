@@ -286,8 +286,10 @@ function saveHandles(store: SceneStore, handles: IKHandle[], editLabel: string) 
   const retained = new Set(handles.map(handle => handle.id));
   const removed = new Set((doc.ikHandles ?? []).filter(handle => !retained.has(handle.id)).map(handle => handle.id));
   const next = { ...doc, ikHandles: handles,
+    ...(doc.customAttributes && removed.size ? { customAttributes: Object.fromEntries(Object.entries(doc.customAttributes).filter(([id]) => !removed.has(id))) } : {}),
+    ...(doc.drivenKeys && removed.size ? { drivenKeys: doc.drivenKeys.filter(relation => !removed.has(relation.driver.targetId) && !removed.has(relation.driven.targetId)) } : {}),
     ...(doc.animation && removed.size ? { animation: { ...doc.animation,
-      tracks: doc.animation.tracks.filter(track => track.channel !== "ik.blend" || !removed.has(track.targetId)) } } : {}) };
+      tracks: doc.animation.tracks.filter(track => !removed.has(track.targetId)) } } : {}) };
   validateIKHandles(handles, next);
   if (next.animation) validateAnimation(next.animation, next);
   if (JSON.stringify(doc.ikHandles ?? []) === JSON.stringify(handles)) return;

@@ -1,4 +1,5 @@
 import { graphTextureReferences } from "./procedural-graph.ts";
+import { particleMapReferences } from "./particle-map-emission.ts";
 import type { SceneStore } from "./scene-store.ts";
 import { addTexture, commitTextureCommand, prepareTexture, relinkTexture, removeTexture, replaceTexture, setTextureRole, textureReferences, type TextureAsset, type TextureRole } from "./texture-assets.ts";
 import "./texture-assets.css";
@@ -73,14 +74,16 @@ export function createTextureAssetsPanel(store: SceneStore, options: {available:
     for(const row of Array.from(list.querySelectorAll<HTMLButtonElement>("button"))){row.setAttribute("aria-pressed",String(row.dataset.textureId===selected));row.disabled=!available()||!!pending;}
     const asset=doc.textureAssets?.[selected], refs=asset?textureReferences(doc,selected):[];
     const graphRefs=asset?graphTextureReferences(doc.proceduralGraph,selected):[];
-    const referenced=refs.length+graphRefs.length>0;
-    relink.textContent=graphRefs.length?"Relink references":"Relink material references";
+    const particleRefs=asset?particleMapReferences(doc,selected):[];
+    const referenced=refs.length+graphRefs.length+particleRefs.length>0;
+    relink.textContent=graphRefs.length||particleRefs.length?"Relink references":"Relink material references";
     importButton.disabled=!available()||!!pending;replaceButton.disabled=!asset||!available()||!!pending;removeButton.disabled=!asset||!available()||!!pending||referenced;
     removeButton.title=referenced?"Referenced textures must be relinked before deletion":"Delete this unreferenced image";
     details.hidden=!asset;
     if(asset){metadata.textContent=`${asset.name}\n${asset.width} × ${asset.height} · ${asset.mime.replace("image/","").toUpperCase()} · ${(asset.byteLength/1024).toFixed(1)} KiB · ${asset.alpha?"Has alpha":"Opaque"}\n${asset.id}`;role.value=asset.role;}
     role.disabled=!available()||!!pending;
     references.textContent=`${refs.length} material reference${refs.length===1?"":"s"}${refs.length?": "+refs.map(r=>`${doc.nodes[r.shapeId].name} / ${r.slot}`).join(", "):""}${graphRefs.length?` · ${graphRefs.length} texture graph ${graphRefs.length===1?"node":"nodes"}`:""}`;
+    if (particleRefs.length) references.textContent += ` · ${particleRefs.length} particle emission ${particleRefs.length === 1 ? "map" : "maps"}`;
     const previous=target.value;target.replaceChildren();for(const a of assets)if(a.id!==selected)target.add(new Option(a.name,a.id));if(Array.from(target.options).some(o=>o.value===previous))target.value=previous;
     target.disabled=!available()||!!pending||!target.options.length;relink.disabled=target.disabled||!referenced;
     apply.disabled=!available();cancelButton.disabled=working;

@@ -5,6 +5,8 @@ import type { SceneStore } from "./scene-store.ts";
 
 export const TEXTURE_LIMITS = { bytes: 16 * 1024 * 1024, pixels: 16_777_216, dimension: 8192, libraryBytes: 64 * 1024 * 1024, count: 512 } as const;
 import { graphTextureReferences, relinkGraphTexture } from "./procedural-graph.ts";
+import { particleMapReferences } from "./particle-map-emission.ts";
+import { validateParticleEmitters } from "./particle-emitter.ts";
 
 export type TextureRole = "color" | "data";
 export type TextureAsset = {
@@ -162,12 +164,14 @@ export function relinkTexture(doc: SceneDocument, from: string, to: string): Sce
     })};
   }
   const graph = relinkGraphTexture(doc.proceduralGraph, from, to, doc.textureAssets);
-  return refs.length || graph !== doc.proceduralGraph ? {...doc,nodes,proceduralGraph:graph} : doc;
+  const particles = particleMapReferences(doc, from);
+  for (const shape of particles) if (shape.type === "particleShape" && shape.emissionMap) nodes[shape.id] = { ...shape, emissionMap: { ...shape.emissionMap, assetId: to } };
+  return refs.length || particles.length || graph !== doc.proceduralGraph ? {...doc,nodes,proceduralGraph:graph} : doc;
 }
 export function removeTexture(doc: SceneDocument, id: string): SceneDocument {
   if (!doc.textureAssets?.[id]) return doc;
-  if (textureReferences(doc,id).length || graphTextureReferences(doc.proceduralGraph,id).length)
-    throw Error("Texture is referenced by materials or the texture graph. Relink its references before deleting.");
+  if (textureReferences(doc,id).length || graphTextureReferences(doc.proceduralGraph,id).length || particleMapReferences(doc,id).length)
+    throw Error("Texture is referenced by materials, particle emission, or the texture graph. Relink its references before deleting.");
   const assets={...doc.textureAssets}; delete assets[id]; return {...doc,textureAssets:assets};
 }
 export function replaceTexture(doc: SceneDocument, id: string, replacement: TextureAsset): SceneDocument {
@@ -185,6 +189,7 @@ export function setTextureRole(doc: SceneDocument, id: string, role: TextureRole
 }
 export function commitTextureCommand(store: SceneStore, label: string, action: (doc: SceneDocument)=>SceneDocument) {
   const before=store.getState().document, next=action(before);
+  if (next !== before) validateParticleEmitters(next);
   if (next!==before) { store.setState({document:next,editLabel:label}); trimTextureHistory(store); }
   return next;
 }

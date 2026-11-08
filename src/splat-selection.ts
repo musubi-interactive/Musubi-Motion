@@ -3,7 +3,7 @@ import type { SplatMesh, SplatSkinning } from "@sparkjsdev/spark";
 
 // Spark's CPU raycast reads the undeformed asset. Build the same affine
 // transforms used by GPU skinning for picking, marquee selection and bounds.
-export function posedSelection(mesh:SplatMesh,skin:SplatSkinning,transforms:THREE.Matrix4[],active?:(index:number)=>boolean) {
+export function posedSelection(mesh:SplatMesh,skin:SplatSkinning,transforms:THREE.Matrix4[],active?:(index:number)=>boolean, affine?:(index:number)=>THREE.Matrix4|undefined) {
   const source=mesh.extSplats!;
   const centers=new Float32Array(source.numSplats*3);
   const bounds=new THREE.Box3();
@@ -18,7 +18,9 @@ export function posedSelection(mesh:SplatMesh,skin:SplatSkinning,transforms:THRE
       if(w&&bone)for(let j=0;j<16;j++)m.elements[j]+=w*bone.elements[j];
     }
     m.elements[15]=1;
-    const center=s.center.clone().applyMatrix4(m);centers.set(center.toArray(),i*3);
+    const rest=affine?.(i);
+    const center=s.center.clone();if(rest)center.applyMatrix4(rest);center.applyMatrix4(m);centers.set(center.toArray(),i*3);
+    if(rest)m.multiply(rest);
     m.multiply(new THREE.Matrix4().compose(s.center,s.quaternion,s.scales.clone().multiplyScalar(2)));
     const e=m.elements;
     const extent=new THREE.Vector3(Math.hypot(e[0],e[4],e[8]),Math.hypot(e[1],e[5],e[9]),Math.hypot(e[2],e[6],e[10]));

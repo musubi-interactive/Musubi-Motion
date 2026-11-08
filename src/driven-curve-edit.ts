@@ -1,3 +1,4 @@
+import { isCustomChannel } from "./custom-attributes.ts";
 import {
   POSE_ANIMATION_CHANNELS, insertCurveKey, scaleCurveKeys, validateCurveKeys,
   type AnimationTrack, type CurveKey,
@@ -99,7 +100,7 @@ function validateClipboard(clipboard: DrivenCurveClipboard): void {
     if (!relation || typeof relation.id !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(relation.id) || ids.has(relation.id))
       throw Error("Invalid or duplicate clipboard relationship ID.");
     ids.add(relation.id);
-    for (const property of [relation.driver, relation.driven]) if (!property || typeof property.targetId !== "string" || !POSE_ANIMATION_CHANNELS.includes(property.channel))
+    for (const property of [relation.driver, relation.driven]) if (!property || typeof property.targetId !== "string" || !(POSE_ANIMATION_CHANNELS as readonly string[]).includes(property.channel) && !isCustomChannel(property.channel))
       throw Error("Invalid clipboard driver or driven channel.");
     const output = propertyKey(relation.driven);
     if (outputs.has(output)) throw Error("A clipboard driven channel can have only one driver.");

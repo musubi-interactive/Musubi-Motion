@@ -1,6 +1,9 @@
-import { POSE_ANIMATION_CHANNELS, evaluateChannels, evaluateCurve, readChannel, type PoseAnimationChannel, type CurveKey } from "./animation.ts";
+import { attributeChoices, isDiscreteAttribute, formatAttributeValue } from "./custom-attribute-types.ts";
+import { customAttribute } from "./custom-attributes.ts";
+import { channelLabel } from "./custom-attributes.ts";
+import { evaluateChannels, evaluateCurve, readChannel, type AnimationChannel, type CurveKey } from "./animation.ts";
 import { deleteDrivenKeys, evaluateDrivenKeys, removeDrivenRelationship, setDrivenKey, upsertDrivenRelationship,
-  type DrivenKeyRelationship, type DrivenProperty, type EvaluatedPose } from "./driven-keys.ts";
+  drivenChannels, type DrivenKeyRelationship, type DrivenProperty, type EvaluatedPose } from "./driven-keys.ts";
 import type { SceneStore } from "./scene-store.ts";
 
 type Options = {
@@ -18,7 +21,7 @@ export function createDrivenKeyPanel(store: SceneStore, options: Options) {
   element.className = "driven-key-panel";
   element.setAttribute("aria-label", "Set Driven Key");
   const style = document.createElement("style");
-  style.textContent = `.driven-key-panel{height:100%;overflow:auto;padding:12px;font-size:12px;background:var(--panel);color:var(--text)}
+  style.textContent = `.driven-key-panel [hidden]{display:none!important}.driven-key-panel{height:100%;overflow:auto;padding:12px;font-size:12px;background:var(--panel);color:var(--text)}
     .driven-key-panel h3{font-size:12px;margin:0 0 8px}.driven-key-panel p{color:var(--muted);line-height:1.5}
     .driven-key-panel .sdk-pair{display:grid;grid-template-columns:repeat(2,minmax(130px,1fr));gap:10px}
     .driven-key-panel fieldset{border:1px solid var(--line);padding:10px;min-width:0}
@@ -58,37 +61,50 @@ export function createDrivenKeyPanel(store: SceneStore, options: Options) {
     const target = document.createElement("select"); target.setAttribute("aria-label", `${title} object`);
     const channel = document.createElement("select"); channel.setAttribute("aria-label", `${title} attribute`);
     const value = numberInput(`${title} value`);
+    const choice = document.createElement("select"); choice.setAttribute("aria-label", `${title} choice`);
     const current = document.createElement("output"); current.className = "sdk-current";
-    const side = { target, channel, value, current };
+    const side = { target, channel, value, current, choice };
+    choice.onchange = () => { value.value = choice.value; };
     fieldset.append(legend, label("Object", target), button(`Load selected as ${title.toLowerCase()}`, () => {
       const id = options.getSelection().find(id => Array.from(target.options).some(option => option.value === id));
       if (!id) { status.textContent = "Select a scene object or joint first."; return; }
       target.value = id; updateChannels(side); sample(side);
-    }), label("Attribute", channel), label(`${title} value`, value), current);
+    }), label("Attribute", channel), label(`${title} value`, value), choice, current);
     target.onchange = () => { updateChannels(side); sample(side); };
     channel.onchange = () => sample(side);
     pair.append(fieldset); return side;
   }
   const driver = makeSide("Driver"), driven = makeSide("Driven");
   type Side = typeof driver;
-  function property(side: Side): DrivenProperty { return { targetId: side.target.value, channel: side.channel.value as PoseAnimationChannel }; }
+  function property(side: Side): DrivenProperty { return { targetId: side.target.value, channel: side.channel.value as AnimationChannel }; }
   function evaluated() {
     if (options.getPoses) return options.getPoses();
     const doc = store.getState().document;
-    const ids = [...Object.values(doc.nodes).filter(node => node.type === "transform").map(node => node.id), ...(doc.joints ?? []).map(joint => joint.id)];
+    const ids = [...Object.values(doc.nodes).filter(node => node.type === "transform").map(node => node.id), ...(doc.joints ?? []).map(joint => joint.id), ...(doc.ikHandles ?? []).filter(handle => doc.customAttributes?.[handle.id]?.length).map(handle => handle.id)];
     const poses = new Map<string, EvaluatedPose>(ids.map(id => [id, evaluateChannels(doc, id, options.getFrame())]));
     evaluateDrivenKeys(doc, poses); return poses;
   }
   function sample(side: Side) {
+    updateChoice(side);
     const poses = evaluated(), pose = poses.get(side.target.value);
-    side.value.value = pose ? String(readChannel(pose, side.channel.value as PoseAnimationChannel)) : "";
+    side.value.value = pose ? String(readChannel(pose, side.channel.value as AnimationChannel)) : "";
+    side.choice.value = side.value.value;
     updateCurrent(poses);
+  }
+  function updateChoice(side: Side) {
+    const attribute = customAttribute(store.getState().document, side.target.value, side.channel.value);
+    const discrete = isDiscreteAttribute(attribute);
+    side.value.closest("label")!.hidden = discrete; side.choice.hidden = !discrete;
+    if (discrete) {
+      side.choice.replaceChildren(...attributeChoices(attribute!).map(entry => new Option(entry.name,String(entry.value))));
+      if(Array.from(side.choice.options).some(option=>option.value===side.value.value))side.choice.value=side.value.value;
+    }
   }
   function updateChannels(side: Side) {
     const previous = side.channel.value;
-    const isJoint = store.getState().document.joints?.some(joint => joint.id === side.target.value);
-    side.channel.replaceChildren(...POSE_ANIMATION_CHANNELS.filter(channel => !isJoint || !channel.startsWith("scale.")).map(channel => new Option(channel, channel)));
+    side.channel.replaceChildren(...drivenChannels(store.getState().document, side.target.value).map(channel => new Option(channelLabel(store.getState().document, side.target.value, channel), channel)));
     if (Array.from(side.channel.options).some(option => option.value === previous)) side.channel.value = previous;
+    updateChoice(side);
   }
   const actions = document.createElement("div"); actions.className = "sdk-actions";
   actions.append(button("Load current values", () => { sample(driver); sample(driven); }), button("Set driven key", () => report(() => {
@@ -111,7 +127,9 @@ export function createDrivenKeyPanel(store: SceneStore, options: Options) {
   function updateCurrent(poses: Map<string, EvaluatedPose>) {
     for (const side of [driver, driven]) {
       const pose = poses.get(side.target.value);
-      side.current.textContent = pose ? `At frame ${options.getFrame()}: ${Number(readChannel(pose, side.channel.value as PoseAnimationChannel).toFixed(5))}` : "No object loaded";
+      const attribute = customAttribute(store.getState().document, side.target.value, side.channel.value);
+      const value = pose ? readChannel(pose, side.channel.value as AnimationChannel) : 0;
+      side.current.textContent = pose ? `At frame ${options.getFrame()}: ${attribute && isDiscreteAttribute(attribute) ? formatAttributeValue(attribute,value) : Number(value.toFixed(5))}` : "No object loaded";
     }
   }
   function drawCurve(relation: DrivenKeyRelationship) {
@@ -153,6 +171,7 @@ export function createDrivenKeyPanel(store: SceneStore, options: Options) {
     const table = document.createElement("table"); table.className = "sdk-keys";
     const head = table.createTHead().insertRow();
     for (const text of ["Driver", "Driven", "Interpolation", "Tangents", ""]) { const th = document.createElement("th"); th.textContent = text; head.append(th); }
+    const discreteRelation = isDiscreteAttribute(customAttribute(store.getState().document, relation.driver.targetId, relation.driver.channel)) || isDiscreteAttribute(customAttribute(store.getState().document, relation.driven.targetId, relation.driven.channel));
     const body = table.createTBody();
     for (const key of relation.keys) {
       const row = body.insertRow();
@@ -162,17 +181,22 @@ export function createDrivenKeyPanel(store: SceneStore, options: Options) {
         upsertDrivenRelationship(store, { ...latest, keys: latest.keys.map(item => item.id === key.id ? { ...item, ...changes } : item) });
       });
       for (const field of ["time", "value"] as const) {
+        const property = field === "time" ? relation.driver : relation.driven, attribute = customAttribute(store.getState().document, property.targetId, property.channel);
+        if (isDiscreteAttribute(attribute)) {
+          const choice = document.createElement("select");choice.setAttribute("aria-label",`${field === "time" ? "Driver" : "Driven"} choice for key ${key.time}`);
+          choice.replaceChildren(...attributeChoices(attribute!).map(entry=>new Option(entry.name,String(entry.value))));choice.value=String(key[field]);choice.onchange=()=>patch({[field]:Number(choice.value)});row.insertCell().append(choice);continue;
+        }
         const input = numberInput(`${field === "time" ? "Driver" : "Driven"} value for key ${key.time}`); input.value = String(key[field]);
         input.onchange = () => { if (!input.value.trim()) { input.value = String(key[field]); return; } patch({ [field]: input.valueAsNumber }); };
         row.insertCell().append(input);
       }
       const interpolation = document.createElement("select"); interpolation.setAttribute("aria-label", `Interpolation for driver ${key.time}`);
-      for (const value of ["linear", "step", "bezier"] as const) interpolation.add(new Option(value, value));
+      for (const value of (discreteRelation ? ["step"] : ["linear", "step", "bezier"]) as CurveKey["interpolation"][]) interpolation.add(new Option(value, value));
       interpolation.value = key.interpolation; interpolation.onchange = () => patch({ interpolation: interpolation.value as CurveKey["interpolation"] }); row.insertCell().append(interpolation);
       const tangent = document.createElement("select"); tangent.setAttribute("aria-label", `Tangents for driver ${key.time}`);
       for (const value of ["auto", "clamped", "flat", "spline"] as const) tangent.add(new Option(value, value));
       if (key.tangentMode === "fixed") tangent.add(new Option("fixed", "fixed"));
-      tangent.value = key.tangentMode; tangent.onchange = () => patch({ tangentMode: tangent.value as CurveKey["tangentMode"], interpolation: "bezier" }); row.insertCell().append(tangent);
+      tangent.disabled = discreteRelation; tangent.value = key.tangentMode; tangent.onchange = () => patch({ tangentMode: tangent.value as CurveKey["tangentMode"], interpolation: "bezier" }); row.insertCell().append(tangent);
       row.insertCell().append(button("Delete", () => report(() => deleteDrivenKeys(store, relation.id, [key.id]))));
     }
     wrap.append(table); curve.append(wrap);
@@ -180,8 +204,8 @@ export function createDrivenKeyPanel(store: SceneStore, options: Options) {
   }
   function refresh() {
     const doc = store.getState().document;
-    const targets = [...Object.values(doc.nodes).filter(node => node.type === "transform"), ...(doc.joints ?? [])];
-    const signature = JSON.stringify(targets.map(target => [target.id, target.name]));
+    const targets = [...Object.values(doc.nodes).filter(node => node.type === "transform"), ...(doc.joints ?? []), ...(doc.ikHandles ?? []).filter(handle => doc.customAttributes?.[handle.id]?.length)];
+    const signature = JSON.stringify([targets.map(target => [target.id, target.name]), doc.customAttributes]);
     if (signature !== lastTargets) {
       lastTargets = signature;
       for (const side of [driver, driven]) {
@@ -195,7 +219,7 @@ export function createDrivenKeyPanel(store: SceneStore, options: Options) {
     if (lastRelationships !== doc.drivenKeys || signature !== relationshipSelect.dataset.targets) {
       lastRelationships = doc.drivenKeys; relationshipSelect.dataset.targets = signature;
       const previous = relationshipSelect.value;
-      relationshipSelect.replaceChildren(...(doc.drivenKeys ?? []).map(relation => new Option(`${targetName(relation.driver.targetId)}.${relation.driver.channel} → ${targetName(relation.driven.targetId)}.${relation.driven.channel}`, relation.id)));
+      relationshipSelect.replaceChildren(...(doc.drivenKeys ?? []).map(relation => new Option(`${targetName(relation.driver.targetId)}.${channelLabel(doc, relation.driver.targetId, relation.driver.channel)} → ${targetName(relation.driven.targetId)}.${channelLabel(doc, relation.driven.targetId, relation.driven.channel)}`, relation.id)));
       if (doc.drivenKeys?.some(relation => relation.id === previous)) relationshipSelect.value = previous;
       renderCurve();
     }

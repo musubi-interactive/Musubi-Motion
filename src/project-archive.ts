@@ -1,3 +1,5 @@
+import { validateCustomAttributes } from "./custom-attributes.ts";
+import { validateSceneSplatMasks } from "./splat-masks.ts";
 import { validateProceduralGraph } from "./procedural-graph.ts";
 import { validateTextureAssets } from "./texture-assets.ts";
 import { Matrix3 } from "three";
@@ -5,6 +7,7 @@ import { BlobReader, BlobWriter, ZipReader, type FileEntry } from "@zip.js/zip.j
 import { sha256 } from "@noble/hashes/sha2.js";
 import { validateJoints } from "./skeleton.ts";
 import { validateElasticity } from "./elasticity";
+import { validateSplatComponentTransforms, SPLAT_TRANSFORM_SCENE_LIMIT } from "./splat-component-transforms.ts";
 import { validateSplatComponentEdits } from "./splat-component-edits.ts";
 import { validateAnimation } from "./animation.ts";
 import { validateDrivenKeys } from "./driven-keys.ts";
@@ -112,6 +115,7 @@ export function validateScene(value: unknown): SceneDocument {
         fail(`Invalid asset size for ${asset.fileName}: expected a positive whole number of bytes.`);
     } else fail("Unsupported asset type.");
   }
+  let transformedSplatCount = 0;
   for (const [key, value] of Object.entries(nodes)) {
     id(key);
     const node = record(value);
@@ -148,6 +152,11 @@ export function validateScene(value: unknown): SceneDocument {
       parents.set(key, parent as string | null);
     } else if (node.type === "splatShape") {
       if (node.componentEdits !== undefined) validateSplatComponentEdits(node.componentEdits);
+      if (node.componentTransforms !== undefined) {
+        validateSplatComponentTransforms(node.componentTransforms);
+        transformedSplatCount += node.componentTransforms.records.length;
+        if (transformedSplatCount > SPLAT_TRANSFORM_SCENE_LIMIT) fail("Scene exceeds 250,000 transformed splat records.");
+      }
       if (node.elasticity !== undefined) {
         validateElasticity(node.elasticity);
         if (!node.binding) fail("Elasticity requires a binding.");
@@ -193,8 +202,8 @@ export function validateScene(value: unknown): SceneDocument {
   }
   const visited = new Set<string>();
   for (const key of parents.keys()) {
-    if (shapeCounts.get(key) !== 1)
-      fail("Each transform must have exactly one renderable shape (splat, curve, mesh or particles).");
+    if ((shapeCounts.get(key) ?? 0) > 1)
+      fail("A transform may have at most one renderable shape; shapeless transforms are groups.");
     const path = new Set<string>();
     let current: string | null = key;
     while (current !== null && !visited.has(current)) {
@@ -217,6 +226,8 @@ export function validateScene(value: unknown): SceneDocument {
       [...parents.values()].filter((p) => p === null).length
   )
     fail("Invalid scene roots.");
+  validateCustomAttributes(value as SceneDocument);
+  validateSceneSplatMasks(value as SceneDocument);
   if (doc.animation !== undefined) validateAnimation(doc.animation, value as SceneDocument);
   if (doc.drivenKeys !== undefined) validateDrivenKeys(doc.drivenKeys, value as SceneDocument);
   if (doc.ikHandles !== undefined) validateIKHandles(doc.ikHandles, value as SceneDocument);

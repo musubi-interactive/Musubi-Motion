@@ -20,6 +20,9 @@ export type SkinInfluence = { jointId: string; weight: number };
 export type SkinWeights = { count: number; overrides: Record<string, SkinInfluence[]> };
 export type SkinBinding = { meshSpace?: boolean; jointIds: string[]; restMatrices: number[][]; weights?: SkinWeights };
 export type SplatShapeNode = {
+  selectionSets?: import("./splat-masks.ts").SplatSelectionSet[];
+  scalarMasks?: import("./splat-masks.ts").SplatScalarMask[];
+  componentTransforms?: import("./splat-component-transforms.ts").SplatComponentTransforms;
   componentEdits?: import("./splat-component-edits.ts").SplatComponentEdits;
   elasticity?: import("./elasticity").Elasticity;
   binding?: SkinBinding;
@@ -66,6 +69,7 @@ export type AssetRecord = { id: string } & (
   | { kind: "file"; fileName: string; byteLength: number }
 );
 export type SceneDocument = {
+  customAttributes?: Record<string, import("./custom-attributes.ts").CustomAttribute[]>;
   textureAssets?: Record<string, import("./texture-assets.ts").TextureAsset>;
   proceduralGraph?: import("./procedural-graph.ts").ProceduralGraph;
   animation?: import("./animation.ts").AnimationData;
@@ -192,7 +196,7 @@ export function deleteSceneItems(doc: SceneDocument, ids: Iterable<string>,
   const freezePoint = (point: Vec3 | undefined, fallback: Vec3): Vec3 =>
     point?.length === 3 && [0, 1, 2].every(i => Number.isFinite(point[i]) && Math.abs(point[i]) <= 1e6)
       ? [...point] : [...fallback];
-  return { ...doc, nodes, rootIds: doc.rootIds.filter(id => !removed.has(id)),
+  return { ...doc, nodes, ...(doc.customAttributes ? { customAttributes: Object.fromEntries(Object.entries(doc.customAttributes).filter(([id]) => !removed.has(id))) } : {}), rootIds: doc.rootIds.filter(id => !removed.has(id)),
     ...(doc.animation ? { animation: { ...doc.animation, tracks: doc.animation.tracks.filter(t => !removed.has(t.targetId)) } } : {}),
     ...(doc.drivenKeys ? { drivenKeys: doc.drivenKeys.filter(r => !removed.has(r.driver.targetId) && !removed.has(r.driven.targetId)) } : {}),
     ...(doc.ikHandles ? { ikHandles: doc.ikHandles.filter(h => !removed.has(h.rootId) && !removed.has(h.endId)).map(handle => {

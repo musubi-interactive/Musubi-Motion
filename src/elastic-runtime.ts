@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import type { SplatMesh, SplatSkinning } from "@sparkjsdev/spark";
 import { elasticEdges, type Elasticity } from "./elasticity";
+import { transformGaussianTRS } from "./splat-component-transforms";
 import { surfaceNeighbors } from "./elastic-neighbors";
 import { allocateFill, radicalInverse, type FillRequest } from "./elastic-allocation";
 import type { Joint } from "./skeleton";
@@ -29,7 +30,7 @@ function quantizeWeights(weights:Map<number,number>):Influence[] {
   return units.filter(w=>w.units>0).map(w=>({bone:w.bone,weight:w.units/255}));
 }
 
-export function createElasticRuntime(mesh:SplatMesh,skin:SplatSkinning,rests:THREE.Matrix4[],bound:string[],joints:Joint[],settings:Elasticity) {
+export function createElasticRuntime(mesh:SplatMesh,skin:SplatSkinning,rests:THREE.Matrix4[],bound:string[],joints:Joint[],settings:Elasticity,affine?:(index:number)=>THREE.Matrix4|undefined) {
   if(!mesh.extSplats)throw Error("Elasticity requires extended splats.");
   const source=mesh.extSplats,count=source.numSplats;
   const originalArrays=source.extArrays.map(a=>a.slice()) as [Uint32Array,Uint32Array];
@@ -78,6 +79,7 @@ export function createElasticRuntime(mesh:SplatMesh,skin:SplatSkinning,rests:THR
     mesh.updateGenerator();skin.skinTexture.needsUpdate=true;mesh.needsUpdate=true;
   }
   return {
+    invalidate() { last=""; },
     setComponentActive(next:typeof active) {
       if (active === next) return;
       active=next;last="";
@@ -88,14 +90,17 @@ export function createElasticRuntime(mesh:SplatMesh,skin:SplatSkinning,rests:THR
       const signature=transforms.map(m=>m.elements.map(v=>v.toFixed(6)).join(",")).join(";");
       if(signature===last)return;last=signature;
       const matrices=weights.map(w=>blendMatrix(w,transforms));
-      const deformed=originals.map((s,i)=>s.center.clone().applyMatrix4(matrices[i]));
+      const editedCenters=originals.map((s,i)=>{const center=s.center.clone(),matrix=affine?.(i);return matrix?center.applyMatrix4(matrix):center;});
+      const deformed=editedCenters.map((center,i)=>center.clone().applyMatrix4(matrices[i]));
       const stretches=originals.map(()=>new THREE.Vector3(1,1,1));
       const density=settings.density??1;
       const requests:FillRequest[]=[];
       for(const [a,b] of edges) {
         if (active && (!active(a) || !active(b))) continue;
-        const delta=originals[b].center.clone().sub(originals[a].center),restLength=delta.length();
-        const ratio=deformed[a].distanceTo(deformed[b])/restLength;
+        const delta=originals[b].center.clone().sub(originals[a].center);
+        const editedRestLength=editedCenters[a].distanceTo(editedCenters[b]);
+        if(editedRestLength<1e-12)continue;
+        const ratio=deformed[a].distanceTo(deformed[b])/editedRestLength;
         for(const i of [a,b]) {
           const local=delta.clone().normalize().applyQuaternion(originals[i].quaternion.clone().invert());
           const strain=Math.max(0,Math.min(32,ratio)-1);
@@ -107,7 +112,7 @@ export function createElasticRuntime(mesh:SplatMesh,skin:SplatSkinning,rests:THR
       for(const ids of triangles) {
         const [a,b,c]=ids;
         if (active && (!active(a) || !active(b) || !active(c))) continue;
-        const restArea=originals[b].center.clone().sub(originals[a].center).cross(originals[c].center.clone().sub(originals[a].center)).length();
+        const restArea=editedCenters[b].clone().sub(editedCenters[a]).cross(editedCenters[c].clone().sub(editedCenters[a])).length();
         if(restArea<1e-12)continue;
         const area=deformed[b].clone().sub(deformed[a]).cross(deformed[c].clone().sub(deformed[a])).length();
         const ratio=area/restArea;
@@ -134,16 +139,19 @@ export function createElasticRuntime(mesh:SplatMesh,skin:SplatSkinning,rests:THR
         const center=new THREE.Vector3(),scales=new THREE.Vector3(),color=new THREE.Color(0,0,0);
         let opacity=0;
         r.ids.forEach((i,j)=>{
-          center.addScaledVector(deformed[i],bary[j]);scales.addScaledVector(scaled(i,settings.expansion),bary[j]);
+          center.addScaledVector(deformed[i],bary[j]);
+          const evaluated=transformGaussianTRS(originals[i].quaternion,scaled(i,settings.expansion),affine?.(i));
+          scales.addScaledVector(evaluated.scales,bary[j]);
           color.r+=originals[i].color.r*bary[j];color.g+=originals[i].color.g*bary[j];color.b+=originals[i].color.b*bary[j];
           opacity+=originals[i].opacity*bary[j];
         });
         // Store the inverse-skinned target to land exactly inside the actual gap
         // after Spark applies the new splat's blended (quantized) joint weights.
         center.applyMatrix4(matrix.invert());
-        const quaternion=originals[r.ids[0]].quaternion.clone();
+        const editedRotation=(i:number)=>transformGaussianTRS(originals[i].quaternion,scaled(i,settings.expansion),affine?.(i)).quaternion;
+        const quaternion=editedRotation(r.ids[0]);
         let accumulated=bary[0];
-        for(let j=1;j<r.ids.length;j++){accumulated+=bary[j];quaternion.slerp(originals[r.ids[j]].quaternion,bary[j]/accumulated);}
+        for(let j=1;j<r.ids.length;j++){accumulated+=bary[j];quaternion.slerp(editedRotation(r.ids[j]),bary[j]/accumulated);}
         if(![...center.toArray(),...scales.toArray()].every(Number.isFinite))continue;
         const index=count+generated++;
         source.setSplat(index,center,scales,quaternion,opacity,color);

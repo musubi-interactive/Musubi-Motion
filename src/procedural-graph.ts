@@ -1,6 +1,7 @@
 import type { SceneDocument } from "./scene-document.ts";
 import type { SceneStore } from "./scene-store.ts";
 import type { TextureAsset } from "./texture-assets.ts";
+import { validateParticleEmitters } from "./particle-emitter.ts";
 
 export const GRAPH_LIMITS = { nodes: 48, edges: 96, images: 4, pixels: 8_388_608, layout: 12_000 } as const;
 export const GRAPH_KINDS = {
@@ -243,6 +244,7 @@ export function commitGraphCommand(store: SceneStore, name: string, edit: (graph
   if (graph === before.proceduralGraph) return;
   if (graph) validateProceduralGraph(graph, before.textureAssets);
   const next: SceneDocument = { ...before, proceduralGraph: graph };
+  validateParticleEmitters(next);
   store.setState({ document: next, editLabel: name });
 }
 export function graphTextureReferences(graph: ProceduralGraph | undefined, id: string) {

@@ -5,8 +5,8 @@ type DraftSnapshot = { epoch: number; poses: Map<string, AnimationPose> };
 
 /** Transform drafts must not mask independent edits to mesh blend shapes. */
 export function applyTransformPoseDraft(evaluated: AnimationPose, draft: AnimationPose): AnimationPose {
-  const { morphWeights: _previousWeights, ...transform } = draft;
-  return { ...transform, ...(evaluated.morphWeights ? { morphWeights: [...evaluated.morphWeights] } : {}) };
+  const { morphWeights: _previousWeights, customValues: _previousCustom, ...transform } = draft;
+  return { ...transform, ...(evaluated.customValues ? { customValues: { ...evaluated.customValues } } : {}), ...(evaluated.morphWeights ? { morphWeights: [...evaluated.morphWeights] } : {}) };
 }
 
 function copyExistingPoses(document: SceneDocument, poses: ReadonlyMap<string, AnimationPose>) {

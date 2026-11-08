@@ -29,11 +29,13 @@ const MAX_AFFECTED = 20_000;
 type Bucket = { column: number; row: number; chunks: Float64Array[]; used: number };
 
 /** Builds an immutable X-ray screen index; cancelled scans never return a partial index. */
-export async function createSkinBrushIndex(options: ComponentProjectionOptions): Promise<SkinBrushIndex> {
+export async function createSkinBrushIndex(options: ComponentProjectionOptions & { projectedLimit?: number }): Promise<SkinBrushIndex> {
   const { componentCount, width, height } = options;
   const buckets = new Map<string, Bucket>();
   let visibleCount = 0;
+  if (options.projectedLimit !== undefined && (!Number.isSafeInteger(options.projectedLimit) || options.projectedLimit < 1)) throw Error("Invalid projected brush index limit.");
   await scanProjectedComponents(options, (index, x, y) => {
+    if (visibleCount >= (options.projectedLimit ?? Infinity)) throw Error("Brush index exceeds its projected component budget. Use a smaller viewport region; nothing changed.");
     const column = Math.floor(x / CELL_SIZE), row = Math.floor(y / CELL_SIZE), key = `${column}/${row}`;
     let bucket = buckets.get(key);
     if (!bucket) { bucket = { column, row, chunks: [new Float64Array(8 * 3)], used: 0 }; buckets.set(key, bucket); }

@@ -1,13 +1,16 @@
-import { createParticleEmitter, findParticleShape, updateParticleEmitter, type ParticleEmission, type ParticleEmitterPatch, type ParticleShapeNode } from "./particle-emitter.ts";
+import { createParticleEmitter, findParticleShape, updateParticleEmitter, validateParticleEmitters, type ParticleEmission, type ParticleEmitterPatch, type ParticleShapeNode } from "./particle-emitter.ts";
 import { findMeshShape } from "./mesh-modeling.ts";
-import type { Vec3 } from "./scene-document.ts";
+import type { SceneDocument, Vec3 } from "./scene-document.ts";
 import type { SceneStore } from "./scene-store.ts";
+import { defaultParticleEmissionMap, type ParticleEmissionMap } from "./particle-map-emission.ts";
+import { propertyInteraction } from "./property-interaction.ts";
 
 type Options = {
   available: () => boolean;
   getSelection: () => string[];
   onSelectObject: (id: string) => void;
   getRuntimeStatus?: (shapeId: string) => { count: number; pending: boolean; error?: string } | undefined;
+  onPreviewChange?: () => void;
 };
 const emissionNames: Record<ParticleEmission, string> = { omni: "Omni", directional: "Directional", box: "Box volume", sphere: "Sphere volume", surface: "Mesh surface" };
 
@@ -18,7 +21,7 @@ export function createParticlePanel(store: SceneStore, options: Options) {
   style.textContent = `.particle-panel{height:100%;overflow:auto;padding:12px;background:var(--panel);color:var(--text);font-size:12px}
     .particle-panel p{line-height:1.5;color:var(--muted)}.particle-panel fieldset{border:1px solid var(--line);padding:10px;margin:0 0 12px;min-width:0}.particle-panel legend{padding:0 5px}.particle-panel label{display:grid;gap:5px;margin:8px 0}
     .particle-panel input,.particle-panel select,.particle-panel button{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:3px;padding:6px;min-width:0;box-sizing:border-box}.particle-panel input:not([type=checkbox]),.particle-panel select{width:100%}
-    .particle-panel button{cursor:pointer}.particle-panel button:hover:not(:disabled){background:var(--hover)}.particle-panel :disabled{opacity:.45;cursor:default}.particle-panel :focus-visible{outline:1px solid var(--strong)}
+    .particle-panel input[type=number]{text-align:right}.particle-panel [data-locked]{opacity:.55}.particle-panel button{cursor:pointer}.particle-panel button:hover:not(:disabled){background:var(--hover)}.particle-panel :disabled{opacity:.45;cursor:default}.particle-panel :focus-visible{outline:1px solid var(--strong)}
     .particle-panel .particle-check{display:flex;align-items:center;gap:7px}.particle-panel .particle-xyz{display:grid;grid-template-columns:repeat(3,minmax(35px,1fr));gap:6px}.particle-panel .particle-pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}
     .particle-panel details{margin:12px 0}.particle-panel summary{cursor:pointer}.particle-panel .particle-status{min-height:20px;overflow-wrap:anywhere}.particle-panel [data-error=true]{color:#ce756a}`;
   function label(text: string, control: HTMLElement) { const node = document.createElement("label"); node.append(document.createTextNode(text), control); return node; }
@@ -38,6 +41,9 @@ export function createParticlePanel(store: SceneStore, options: Options) {
   const dynamics = group("Dynamics"), appearance = group("Appearance");
   const status = note(""); status.className = "particle-status"; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
   let activeId = "", selectionSignature = "", emitterSignature = "", displayedId = "";
+  let draft: { base: SceneDocument; next: SceneDocument } | undefined;
+  function evaluationDocument() { const doc = store.getState().document; return draft?.base === doc ? draft.next : doc; }
+  function clearDraft() { draft = undefined; options.onPreviewChange?.(); }
   const bindings: { input: HTMLInputElement; read: (shape: ParticleShapeNode) => string }[] = [];
 
   function current() { const shape = findParticleShape(store.getState().document, activeId); if (!shape) throw Error("Choose a particle emitter first."); return shape; }
@@ -47,26 +53,43 @@ export function createParticlePanel(store: SceneStore, options: Options) {
     catch (error) { status.textContent = error instanceof Error ? error.message : String(error); status.dataset.error = "true"; }
     refresh();
   }
-  function patch(value: ParticleEmitterPatch) { updateParticleEmitter(store, current().id, value); }
+  function patch(value: ParticleEmitterPatch) { draft = undefined; updateParticleEmitter(store, current().id, value); options.onPreviewChange?.(); }
   function bindNumber(parent: HTMLElement, title: string, read: (shape: ParticleShapeNode) => number,
     write: (shape: ParticleShapeNode, value: number) => ParticleEmitterPatch, min: number, max: number, step = "any") {
     const input = document.createElement("input"); input.type = "number"; input.min = String(min); input.max = String(max); input.step = step; input.setAttribute("aria-label", title);
-    let cancel = false, editingId = "";
-    input.onfocus = () => { editingId = activeId; };
-    input.addEventListener("blur", () => {
-      if (!cancel && editingId === activeId) run(() => {
+    let cancel = false, editingId = "", dirty = false;
+    const preview = (value: number) => {
+      dirty = true;
+      if (!options.available() || input.readOnly || editingId !== activeId || !Number.isFinite(value) || value < min || value > max || step === "1" && !Number.isInteger(value)) return;
+      try {
+        const base = store.getState().document, shape = current(), next = { ...base, nodes: { ...base.nodes, [shape.id]: { ...shape, ...write(shape, value) } } };
+        validateParticleEmitters(next); draft = { base, next }; status.textContent = "Live preview · Enter or release to commit; Escape to cancel."; status.dataset.error = "false"; options.onPreviewChange?.();
+      } catch (error) { clearDraft(); status.textContent = error instanceof Error ? error.message : String(error); status.dataset.error = "true"; }
+    };
+    input.oninput = () => preview(input.valueAsNumber);
+    const commit = () => {
+      if (!cancel && dirty && editingId === activeId) { dirty = false; run(() => {
         const value = input.valueAsNumber;
         if (!input.value.trim() || !Number.isFinite(value) || value < min || value > max || (step === "1" && !Number.isInteger(value)))
           throw Error(`${title} must be ${step === "1" ? "a whole number" : "a finite number"} from ${min} to ${max}.`);
         patch(write(current(), value));
-      });
-      cancel = false; refresh();
+      }); }
+    };
+    input.onchange = commit;
+    input.onfocus = () => { editingId = activeId; dirty = false; };
+    input.addEventListener("blur", () => {
+      commit();
+      clearDraft(); cancel = false; refresh();
     });
     input.addEventListener("keydown", event => {
       if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); input.blur(); }
-      else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); cancel = true; input.blur(); }
+      else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); cancel = true; dirty = false; input.value = String(read(current())); clearDraft(); input.blur(); }
     });
-    bindings.push({ input, read: shape => String(read(shape)) }); parent.append(label(title, input)); return input;
+    const row = label(title, input);
+    row.addEventListener("pointerdown", e => { if (e.button === 1 && !input.disabled) input.focus(); }, true);
+    const lock = propertyInteraction(input, () => `particle:${activeId}:${title}`, row, () => ({ update: preview, end: clearDraft }));
+    input.addEventListener("focus", lock);
+    bindings.push({ input, read: shape => { lock(); return String(read(shape)); } }); parent.append(row); return input;
   }
   function bindVector(parent: HTMLElement, title: string, read: (shape: ParticleShapeNode) => Vec3,
     write: (shape: ParticleShapeNode, value: Vec3) => ParticleEmitterPatch, min: number, max: number) {
@@ -77,6 +100,30 @@ export function createParticlePanel(store: SceneStore, options: Options) {
   }
   bindNumber(emission, "Rate · particles/second", shape => shape.rate, (_, rate) => ({ rate }), 0, 10000);
   bindNumber(emission, "Lifetime · seconds", shape => shape.lifetime, (_, lifetime) => ({ lifetime }), 0.01, 60);
+  const mapSection = group("Texture Emission Attributes"), mapEnabled = document.createElement("input"); mapEnabled.type = "checkbox"; mapEnabled.setAttribute("aria-label", "Enable Texture Rate");
+  const mapCheck = label("Enable Texture Rate", mapEnabled); mapCheck.className = "particle-check"; mapSection.append(mapCheck);
+  const mapSettings = document.createElement("div"), mapSource = select("Texture Rate source"), mapImage = select("Texture Rate image"), projection = select("Emission map projection"), channel = select("Emission map channel");
+  mapSource.add(new Option("Image asset", "image")); mapSource.add(new Option("Texture Graph output", "graph"));
+  for (const [value, title] of [["uv", "Surface UV (UV0)"], ["xy", "Local XY"], ["xz", "Local XZ"], ["yz", "Local YZ"]]) projection.add(new Option(title, value));
+  channel.add(new Option("Luminance (mean linear RGB)", "luminance")); channel.add(new Option("Alpha", "alpha"));
+  const mapOf = (shape: ParticleShapeNode) => shape.emissionMap ?? defaultParticleEmissionMap();
+  const mapPatch = (shape: ParticleShapeNode, value: Partial<ParticleEmissionMap>): ParticleEmitterPatch => ({ emissionMap: { ...mapOf(shape), ...value } });
+  mapSettings.append(label("Texture Rate", mapSource), label("Image from Texture Assets", mapImage), label("Coordinates", projection), label("Density channel", channel));
+  const invert = document.createElement("input"); invert.type = "checkbox"; invert.setAttribute("aria-label", "Emit From Dark"); const invertLabel = label("Emit From Dark · invert density", invert); invertLabel.className = "particle-check"; mapSettings.append(invertLabel);
+  bindNumber(mapSettings, "Density strength · 0 to 1", shape => mapOf(shape).strength, (shape, strength) => mapPatch(shape, { strength }), 0, 1, "0.01");
+  const bounds = details("Local projection bounds");
+  for (const [i, name] of ["U minimum", "V minimum", "U maximum", "V maximum"].entries()) bindNumber(bounds, name, shape => mapOf(shape).bounds[i], (shape, value) => {
+    const bounds = [...mapOf(shape).bounds] as ParticleEmissionMap["bounds"]; bounds[i] = value; return mapPatch(shape, { bounds });
+  }, -1000000, 1000000, "0.1");
+  mapSettings.append(bounds, note("Base rate × sampled density × strength. Density clamps to 0–1; zero emits nothing. Images use their Color/Raw role, with nearest clamped UV sampling (origin lower left). Local bounds are in the surface's rest coordinates."), note("Graph Time samples absolute historical birth frame ÷ scene FPS at the existing 120 Hz simulation step. Edit the graph in View > Texture Graph. Decoded pixels and GPU resources stay outside undo and scene archives."));
+  mapSection.append(mapSettings); emission.append(mapSection);
+  let assetsSignature = "";
+  mapEnabled.onchange = () => run(() => patch(mapPatch(current(), { enabled: mapEnabled.checked })));
+  mapSource.onchange = () => run(() => patch(mapPatch(current(), { source: mapSource.value as ParticleEmissionMap["source"] })));
+  mapImage.onchange = () => run(() => patch(mapPatch(current(), { assetId: mapImage.value })));
+  projection.onchange = () => run(() => patch(mapPatch(current(), { projection: projection.value as ParticleEmissionMap["projection"] })));
+  channel.onchange = () => run(() => patch(mapPatch(current(), { channel: channel.value as ParticleEmissionMap["channel"] })));
+  invert.onchange = () => run(() => patch(mapPatch(current(), { invert: invert.checked })));
   const timing = details("Timing and random seed");
   bindNumber(timing, "Emission start frame", shape => shape.startFrame, (_, startFrame) => ({ startFrame }), -100000, 100000, "1");
   bindNumber(timing, "Emission end frame", shape => shape.endFrame, (_, endFrame) => ({ endFrame }), -100000, 100000, "1");
@@ -135,11 +182,11 @@ export function createParticlePanel(store: SceneStore, options: Options) {
   preset.onchange = () => refresh();
   enabled.onchange = () => run(() => patch({ enabled: enabled.checked }));
   emitters.onchange = () => run(() => { activeId = emitters.value; status.textContent = ""; if (activeId) options.onSelectObject(current().parentId); });
-  function resetScene() { activeId = ""; displayedId = ""; selectionSignature = JSON.stringify(options.getSelection()); status.textContent = ""; status.dataset.error = "false"; refresh(); }
+  function resetScene() { draft = undefined; activeId = ""; displayedId = ""; selectionSignature = JSON.stringify(options.getSelection()); status.textContent = ""; status.dataset.error = "false"; refresh(); }
   function refresh() {
     const doc = store.getState().document, selection = options.getSelection(), available = options.available();
     const selectionKey = JSON.stringify(selection);
-    if (selectionKey !== selectionSignature) { selectionSignature = selectionKey; activeId = selection.length === 1 ? findParticleShape(doc, selection[0])?.id ?? "" : ""; }
+    if (selectionKey !== selectionSignature) { draft = undefined; selectionSignature = selectionKey; activeId = selection.length === 1 ? findParticleShape(doc, selection[0])?.id ?? "" : ""; }
     const shapes = Object.values(doc.nodes).filter((node): node is ParticleShapeNode => node.type === "particleShape");
     const listKey = JSON.stringify(shapes.map(shape => [shape.id, doc.nodes[shape.parentId]?.name ?? shape.name]));
     if (listKey !== emitterSignature) { emitterSignature = listKey; emitters.replaceChildren(new Option("Choose a particle emitter", ""), ...shapes.map(shape => new Option(doc.nodes[shape.parentId]?.name ?? shape.name, shape.id))); }
@@ -156,6 +203,11 @@ export function createParticlePanel(store: SceneStore, options: Options) {
       : "Create at the origin, then position the emitter with the normal object transform tools.";
     if (!shape) { runtime.textContent = ""; return; }
     enabled.checked = shape.enabled;
+    mapSection.hidden = shape.emission !== "surface";
+    const m = mapOf(shape), assetList = Object.values(doc.textureAssets ?? {}), signature = JSON.stringify(assetList.map(a => [a.id, a.name]));
+    if (signature !== assetsSignature) { assetsSignature = signature; mapImage.replaceChildren(new Option("Choose an imported image", ""), ...assetList.map(a => new Option(a.name, a.id))); }
+    mapEnabled.checked = m.enabled; mapSource.value = m.source; mapImage.value = m.assetId; projection.value = m.projection; channel.value = m.channel; invert.checked = m.invert;
+    mapImage.parentElement!.hidden = m.source !== "image"; bounds.hidden = m.projection === "uv";
     for (const binding of bindings) if (switched || document.activeElement !== binding.input) binding.input.value = binding.read(shape);
     direction.hidden = shape.emission === "omni";
     directionAxes.hidden = shape.emission === "surface";
@@ -169,5 +221,5 @@ export function createParticlePanel(store: SceneStore, options: Options) {
     runtime.dataset.error = String(!!state?.error);
   }
   store.subscribe(() => refresh()); refresh();
-  return { element, refresh, resetScene };
+  return { element, refresh, resetScene, evaluationDocument };
 }
