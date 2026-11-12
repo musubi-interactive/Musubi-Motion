@@ -1,15 +1,17 @@
 import {
-  graphOrder, outputPorts, portKey, validateProceduralGraph,
+  graphOrder, inputPorts, outputPorts, portKey, validateProceduralGraph,
   type Color, type GraphNode, type PortType, type ProceduralGraph,
 } from "./procedural-graph.ts";
 import type { TextureAsset } from "./texture-assets.ts";
+import type { ParticleGraphSample, ParticleGraphValues, SampleParticleGraph } from "./particle-map-fields.ts";
 
 export const PREVIEW_SIZE = 256;
 const LIMIT = 1e6;
 type Vector2 = [number, number];
 type Value = number | Vector2 | Color;
 type Inputs = Map<string, { node: string; port: string }>;
-type GraphSample = { uv: Vector2; position?: Color; frame: number; fps: number };
+type GraphSample = { uv: Vector2; position?: Color; frame: number; fps: number } &
+  Partial<Pick<ParticleGraphSample, "particleAge" | "particleLifetime">>;
 export type PixelSource = { width: number; height: number; rgba: Uint8Array | Uint8ClampedArray };
 export type GraphProgram = {
   fragment: string;
@@ -18,12 +20,19 @@ export type GraphProgram = {
   animated: boolean;
   sample: (point: GraphSample, images?: ReadonlyMap<string, PixelSource>) => [number, number, number, number];
 };
+type ParticleGraphProgram = GraphProgram & {
+  appearanceImages: TextureAsset[];
+  fieldImages: TextureAsset[];
+  sampleAppearance: SampleParticleGraph;
+  sampleField: SampleParticleGraph;
+};
 
 const clamp = (value: number, low = 0, high = 1) => Math.min(high, Math.max(low, value));
 const frac = (value: number) => value - Math.floor(value);
 const f = Math.fround;
 const mix = (a: number, b: number, t: number) => f(f(a * f(1 - t)) + f(b * t));
 const rgbToLinear = (c: number) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+const srgbBytes = Array.from({ length: 256 }, (_, value) => rgbToLinear(value / 255));
 const linearToRgb = (c: number) => c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055;
 export const displayPixel = (linear: [number, number, number, number]) =>
   linear.map((c, index) => Math.round(255 * (index === 3 ? clamp(c) : linearToRgb(clamp(c)))));
@@ -66,59 +75,95 @@ function sampleTexture(asset: TextureAsset | undefined, images: ReadonlyMap<stri
   const x = Math.min(image.width - 1, Math.floor(f(clamp(u) * image.width)));
   const y = Math.min(image.height - 1, Math.floor(f(f(1 - clamp(v)) * image.height)));
   const offset = (y * image.width + x) * 4;
-  return Array.from({ length: 4 }, (_, i) => {
-    const value = image.rgba[offset + i] / 255;
-    return asset.role === "color" && i < 3 ? rgbToLinear(value) : value;
-  });
+  const rgba = image.rgba, r = rgba[offset], g = rgba[offset + 1], b = rgba[offset + 2], a = rgba[offset + 3];
+  return asset.role === "color" ? [srgbBytes[r], srgbBytes[g], srgbBytes[b], a / 255]
+    : [r / 255, g / 255, b / 255, a / 255];
 }
 
-function reference(nodes: GraphNode[], inputs: Inputs, assets: Readonly<Record<string, TextureAsset>>, point: GraphSample, images?: ReadonlyMap<string, PixelSource>): [number, number, number, number] {
-  const time = graphSeconds(point.frame, point.fps), values = new Map<string, Value>();
-  const uv = point.uv.map(f) as Vector2;
-  const position = (point.position ?? [uv[0], uv[1], 0]).map(f) as Color;
-  for (const node of nodes) {
-    const read = (port: string, fallback: Value): Value => {
-      const source = inputs.get(portKey({ node: node.id, port }));
-      return source ? values.get(portKey(source))! : fallback;
-    };
-    const write = (port: string, value: Value) => values.set(portKey({ node: node.id, port }), value);
-    switch (node.kind) {
-      case "uv": write("uv", uv); break;
-      case "position": write("position", position); break;
-      case "time": write("value", time); break;
-      case "texture": {
-        const [r, g, b, a] = sampleTexture(assets[node.params.assetId], images, read("uv", uv));
-        write("color", [r, g, b]); write("alpha", a); break;
-      }
-      case "noise": write("value", noise(read("position", position), node.params.scale, read("time", 0) as number, node.params.speed, node.params.seed)); break;
-      case "gradient": {
-        const factor = clamp(read("factor", uv[0]) as number);
-        const { start, end } = node.params;
-        write("color", start.map((value, index) => mix(f(value), f(end[index]), factor)) as Color);
-        break;
-      }
-      case "add":
-      case "multiply":
-      case "clamp": {
-        const count = sizeOf[node.params.type];
-        let result: number[];
-        if (node.kind === "clamp") {
-          const low = read("min", f(node.params.min)) as number;
-          const high = read("max", f(node.params.max)) as number;
-          result = components(read("value", f(node.params.value)), count).map(x => clamp(x, Math.min(low, high), Math.max(low, high)));
-        } else {
-          const a = components(read("a", f(node.params.a)), count);
-          const b = components(read("b", f(node.params.b)), count);
-          const add = node.kind === "add";
-          result = a.map((x, i) => clamp(f(add ? x + b[i] : x * b[i]), -LIMIT, LIMIT));
-        }
-        write("value", count === 1 ? result[0] : result as Vector2 | Color);
-        break;
-      }
-      case "output": return [...components(read("color", 0), 3), clamp(read("alpha", f(node.params.alpha)) as number)] as [number, number, number, number];
+/** Resolve validated wires once. The per-sample path reuses the small slot
+ * array and never rebuilds keys or a node/port map for each splat. */
+function compileReference(nodes: GraphNode[], inputs: Inputs, assets: Readonly<Record<string, TextureAsset>>, fieldOnly = false) {
+  const slots = new Map<string, number>(), values: Value[] = [];
+  const zeroField: Color = [0, 0, 0];
+  for (const node of nodes) for (const port of outputPorts(node))
+    slots.set(portKey({ node: node.id, port: port.name }), slots.size);
+  const steps = nodes.map(node => {
+    const ins: Record<string, number | undefined> = {};
+    const outs: Record<string, number> = {};
+    for (const port of inputPorts(node)) {
+      const source = inputs.get(portKey({ node: node.id, port: port.name }));
+      if (source) ins[port.name] = slots.get(portKey(source));
     }
-  }
-  throw new Error("Texture graph Output is missing.");
+    for (const port of outputPorts(node)) outs[port.name] = slots.get(portKey({ node: node.id, port: port.name }))!;
+    return {
+      node,
+      read(port: string, fallback: Value): Value {
+        const slot = ins[port];
+        return slot === undefined ? fallback : values[slot];
+      },
+      write(port: string, value: Value) { values[outs[port]] = value; },
+    };
+  });
+  return (point: GraphSample, images?: ReadonlyMap<string, PixelSource>, particle?: ParticleGraphValues): ParticleGraphValues["rgba"] | undefined => {
+    const time = graphSeconds(point.frame, point.fps);
+    const uv = point.uv.map(f) as Vector2;
+    const position = (point.position ?? [uv[0], uv[1], 0]).map(f) as Color;
+    for (const { node, read, write } of steps) {
+      switch (node.kind) {
+        case "uv": write("uv", uv); break;
+        case "position": write("position", position); break;
+        case "time": write("value", time); break;
+        case "particle": {
+          const age = point.particleAge ?? 0, life = point.particleLifetime ?? 0;
+          write("age", f(age)); write("lifetime", f(life)); write("normalizedAge", life > 0 ? f(clamp(age / life)) : 0);
+          break;
+        }
+        case "vector": write("vector", [read("x", 0), read("y", 0), read("z", 0)] as Color); break;
+        case "texture": {
+          const [r, g, b, a] = sampleTexture(assets[node.params.assetId], images, read("uv", uv));
+          write("color", [r, g, b]); write("alpha", a); break;
+        }
+        case "noise": write("value", noise(read("position", position), node.params.scale, read("time", 0) as number, node.params.speed, node.params.seed)); break;
+        case "gradient": {
+          const factor = clamp(read("factor", uv[0]) as number);
+          const { start, end } = node.params;
+          write("color", start.map((value, index) => mix(f(value), f(end[index]), factor)) as Color);
+          break;
+        }
+        case "add":
+        case "multiply":
+        case "clamp": {
+          const count = sizeOf[node.params.type];
+          let result: number[];
+          if (node.kind === "clamp") {
+            const low = read("min", f(node.params.min)) as number;
+            const high = read("max", f(node.params.max)) as number;
+            result = components(read("value", f(node.params.value)), count).map(x => clamp(x, Math.min(low, high), Math.max(low, high)));
+          } else {
+            const a = components(read("a", f(node.params.a)), count);
+            const b = components(read("b", f(node.params.b)), count);
+            const add = node.kind === "add";
+            result = a.map((x, i) => clamp(f(add ? x + b[i] : x * b[i]), -LIMIT, LIMIT));
+          }
+          write("value", count === 1 ? result[0] : result as Vector2 | Color);
+          break;
+        }
+        case "output": {
+          if (fieldOnly) {
+            particle!.field = read("field", zeroField) as Color;
+            return;
+          }
+          const rgba = [...components(read("color", 0), 3), clamp(read("alpha", f(node.params.alpha)) as number)] as ParticleGraphValues["rgba"];
+          if (particle) {
+            particle.rgba = rgba;
+            particle.size = read("size", 1) as number;
+          }
+          return rgba;
+        }
+      }
+    }
+    throw new Error("Texture graph Output is missing.");
+  };
 }
 
 const GLSL = "float";
@@ -164,23 +209,30 @@ vec4 readImage(sampler2D image, vec2 coordinate, float srgb) {
 }
 `;
 
-export function compileGraph(graph: ProceduralGraph, assets: Readonly<Record<string, TextureAsset>> = {}): GraphProgram {
+export function compileGraph(graph: ProceduralGraph, assets: Readonly<Record<string, TextureAsset>> = {}): ParticleGraphProgram {
   validateProceduralGraph(graph, assets);
   const inputs: Inputs = new Map(graph.edges.map(edge => [portKey(edge.to), edge.from]));
-  const dependencies = new Map<string, string[]>();
+  const dependencies = new Map<string, typeof graph.edges>();
   for (const edge of graph.edges) {
     const sources = dependencies.get(edge.to.node) ?? [];
-    sources.push(edge.from.node);
+    sources.push(edge);
     dependencies.set(edge.to.node, sources);
   }
-  const active = new Set<string>();
-  function visit(id: string) {
-    if (active.has(id)) return;
-    active.add(id);
-    for (const source of dependencies.get(id) ?? []) visit(source);
+  const output = graph.nodes.find(node => node.kind === "output")!.id, ordered = graphOrder(graph);
+  function branch(ports: readonly string[]) {
+    const active = new Set<string>();
+    function visit(id: string) {
+      if (active.has(id)) return;
+      active.add(id);
+      for (const edge of dependencies.get(id) ?? [])
+        if (id !== output || ports.includes(edge.to.port)) visit(edge.from.node);
+    }
+    visit(output);
+    return ordered.filter(node => active.has(node.id));
   }
-  visit(graph.nodes.find(node => node.kind === "output")!.id);
-  const nodes = graphOrder(graph).filter(node => active.has(node.id));
+  const nodes = branch(["color", "alpha"]);
+  const appearanceNodes = inputs.has(portKey({ node: output, port: "size" })) ? branch(["color", "alpha", "size"]) : nodes;
+  const fieldNodes = branch(["field"]);
   const lines: string[] = [], uniforms: number[] = [], images: TextureAsset[] = [];
   const variables = new Map<string, { variable: string; type: PortType }>();
   const parameter = (value: number | Color) => {
@@ -212,6 +264,9 @@ export function compileGraph(graph: ProceduralGraph, assets: Readonly<Record<str
       case "uv": write("uv", "uv"); break;
       case "position": write("position", "vec3(uv, 0.0)"); break;
       case "time": write("value", "seconds"); break;
+      // The graph preview shows a synthetic one-second particle lifetime across U.
+      case "particle": write("age", "uv.x"); write("lifetime", "1.0"); write("normalizedAge", "uv.x"); break;
+      case "vector": write("vector", "vec3(" + ["x", "y", "z"].map(port => read(port, () => "0.0")).join(", ") + ")"); break;
       case "noise": {
         const coordinate = get("position"), p = coordinate?.variable ?? "vec3(uv, 0.0)";
         const position = coordinate?.type === "vec2" ? "vec3(" + p + ", 0.0)" : p;
@@ -259,12 +314,21 @@ export function compileGraph(graph: ProceduralGraph, assets: Readonly<Record<str
   }
   const declarations = images.map((_, i) => "uniform sampler2D imageSlot" + i + ";");
   if (uniforms.length) declarations.push("uniform vec4 params[" + uniforms.length / 4 + "];");
+  const collectImages = (branchNodes: GraphNode[]) => [...new Set(branchNodes.flatMap(node =>
+    node.kind === "texture" && assets[node.params.assetId] ? [assets[node.params.assetId]] : []))];
+  const sample = compileReference(nodes, inputs, assets);
+  const sampleAppearance = appearanceNodes === nodes ? sample : compileReference(appearanceNodes, inputs, assets);
+  const sampleField = compileReference(fieldNodes, inputs, assets, true);
   return {
     fragment: "#version 300 es\n" + shaderPrelude + declarations.join("\n") + "\nvoid main() {\n" + lines.join("\n") + "\n}",
     uniforms: new Float32Array(uniforms),
     images,
     animated: nodes.some(node => node.kind === "time"),
-    sample: (point, pixels) => reference(nodes, inputs, assets, point, pixels),
+    sample: (point, pixels) => sample(point, pixels)!,
+    appearanceImages: appearanceNodes === nodes ? images : collectImages(appearanceNodes),
+    fieldImages: collectImages(fieldNodes),
+    sampleAppearance: (point, values, pixels) => { sampleAppearance(point, pixels, values); },
+    sampleField: (point, values, pixels) => { sampleField(point, pixels, values); },
   };
 }
 

@@ -1,4 +1,6 @@
 import { validateCustomAttributes } from "./custom-attributes.ts";
+import { validateSceneSplatAttributePaint } from "./splat-attribute-paint.ts";
+import { validateSceneSplatAppearance } from "./splat-appearance.ts";
 import { validateSceneSplatMasks } from "./splat-masks.ts";
 import { validateProceduralGraph } from "./procedural-graph.ts";
 import { validateTextureAssets } from "./texture-assets.ts";
@@ -228,6 +230,8 @@ export function validateScene(value: unknown): SceneDocument {
     fail("Invalid scene roots.");
   validateCustomAttributes(value as SceneDocument);
   validateSceneSplatMasks(value as SceneDocument);
+  validateSceneSplatAppearance(value as SceneDocument);
+  validateSceneSplatAttributePaint(value as SceneDocument);
   if (doc.animation !== undefined) validateAnimation(doc.animation, value as SceneDocument);
   if (doc.drivenKeys !== undefined) validateDrivenKeys(doc.drivenKeys, value as SceneDocument);
   if (doc.ikHandles !== undefined) validateIKHandles(doc.ikHandles, value as SceneDocument);

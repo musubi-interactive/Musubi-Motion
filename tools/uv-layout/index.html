@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>UV Layout · Musubi Motion</title>
+  </head>
+  <body>
+    <header class="app-bar">
+      <a href="../">Tools</a>
+      <h1>UV Layout</h1>
+    </header>
+    <main>
+      <section class="preview" aria-label="UV preview">
+        <div class="preview-bar">
+          <strong id="tile-label">UDIM 1001</strong>
+          <label><input id="checker" type="checkbox" checked /> Checker</label>
+        </div>
+        <canvas id="layout" width="768" height="768" role="img" aria-label="UV tile preview"></canvas>
+        <p id="tile-summary" aria-live="polite">Open an OBJ to preview its UV layout.</p>
+      </section>
+      <aside aria-label="UV layout controls">
+        <section>
+          <h2>Source</h2>
+          <button id="choose-source" type="button">Choose OBJ…</button>
+          <input id="source" type="file" accept=".obj" hidden />
+          <p id="source-status" role="status">Files are processed locally.</p>
+        </section>
+        <section id="objects-section" hidden>
+          <div class="section-bar">
+            <h2>Objects</h2>
+            <div class="button-group">
+              <button id="all-objects" type="button">Select all</button>
+              <button id="clear-objects" type="button">Clear</button>
+            </div>
+          </div>
+          <div id="objects" class="objects"></div>
+          <p id="diagnostics" aria-live="polite"></p>
+        </section>
+        <section>
+          <h2>Tile and Edges</h2>
+          <form id="tile-form" class="tile-form">
+            <label>Tile U <input id="tile-u" type="number" min="-1000000" max="1000000" step="1" value="0" required /></label>
+            <label>Tile V <input id="tile-v" type="number" min="-1000000" max="1000000" step="1" value="0" required /></label>
+            <button type="submit">Apply tile</button>
+          </form>
+          <button id="first-tile" type="button" disabled>First mapped tile</button>
+          <label class="option">Edges
+            <select id="edges">
+              <option value="all">All polygon edges</option>
+              <option value="borders">Island borders</option>
+            </select>
+          </label>
+        </section>
+        <section>
+          <h2>UV Snapshot</h2>
+          <label class="option">Resolution
+            <select id="resolution">
+              <option value="512">512 × 512</option>
+              <option value="1024" selected>1024 × 1024</option>
+              <option value="2048">2048 × 2048</option>
+              <option value="4096">4096 × 4096</option>
+            </select>
+          </label>
+          <label class="option">Line color
+            <select id="line-color">
+              <option value="black">Black</option>
+              <option value="white">White</option>
+            </select>
+          </label>
+          <button id="download" type="button" disabled>Download PNG</button>
+          <p id="export-status" role="status">The PNG has a transparent background.</p>
+        </section>
+      </aside>
+    </main>
+    <script type="module" src="/src/uv-layout/page.ts"></script>
+  </body>
+</html>

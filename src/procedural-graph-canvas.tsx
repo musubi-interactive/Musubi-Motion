@@ -33,7 +33,10 @@ type TextureNode = Node<{ node: GraphNode; ports: Port[]; select(): void }, "tex
 type TextureEdge = Edge<{ input: PortRef }>;
 type Endpoint = { nodeId: string | null; handleId: string | null; handleType: "source" | "target" | null };
 
-const portLabel = (name: string) => name.charAt(0).toUpperCase() + name.slice(1);
+const portLabel = (name: string) => {
+  if (name === "normalizedAge") return "Normalized Age";
+  return name.charAt(0).toUpperCase() + name.slice(1);
+};
 const typeLabel = (types: readonly string[]) => [...new Set(types)].join(" / ");
 const portTitle = (node: GraphNode, port: string) =>
   node.kind === "time" && port === "value" ? "Seconds" : portLabel(port);

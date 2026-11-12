@@ -167,6 +167,67 @@ Open [examples/layered-rig-study.msb](../examples/layered-rig-study.msb) for joi
 orientation, additive arm adjustment and keyed mirrored poses on an override
 layer. Regenerate with `node scripts/create-layered-rig-example.mjs`.
 
+### Merge animation layers
+
+Open **Animation Layers → Merge Layers…** and check two or more unlocked source
+layers. Checkboxes select the merge sources independently of the **Active layer**
+field used for keying. Set **Start frame**, **End frame**, and **Sample By**.
+Both endpoints are included. The sample interval is in scene frames and accepts
+fractional values. The numeric fields support right-aligned input, middle-drag,
+and contextual Lock/Unlock. The options open with keyboard focus on a source
+checkbox. **Cancel** and Escape discard the preview and return focus to the
+merge button.
+
+**Preview Merge** validates the sources and reports the new layer, curve and
+key counts, and maximum checked channel error. **Bake Layers** replaces the
+selected layers with a weight-one override at their lowest stack position and
+makes it active for ordinary Graph Editor and Dope Sheet edits. Bake is one
+undoable edit. Undo restores the original source layers, their keys and weights,
+and the previous active layer. Redo restores the baked layer.
+
+For each contributing channel, the bake samples Base and the enabled stack
+through the last selected layer using their current blend and animated weights.
+Base and every nonselected layer keep their authored records and order. The
+baked override captures the lower stack's sampled values for those channels,
+so later edits to Base or a layer underneath it can be masked. Layers above the
+sources still apply in order. An unselected layer between the sources may
+remain when it keys separate channels. Merge stops if it overlaps a channel
+being baked. The current mute and solo state applies, including zero-weight
+solo layers. A statically zero-weight source supplies no curves. An animated
+weight contributes wherever its sampled value is nonzero. Source layers are
+removed as a whole, and the baked curves hold their endpoint values outside the
+sampled range.
+
+Continuous curves use linear segments with extra keys at source key times,
+weighted Bezier extrema, and where probes require a closer fit. Rotation preserves unwrapped local Euler
+components, including whole revolutions. Visibility and discrete attributes
+use Step keys. The check compares the original and baked stack at each accepted
+segment's quarter, half, and three-quarter positions, plus positions immediately
+inside Step segment boundaries for discrete channels, with tolerance
+`0.001 + 0.000001 × abs(original)` in channel units. It also checks the final
+visibility threshold and exact Boolean or Enum values at those positions.
+For Visibility, Boolean and Enum curves in the captured stack, animated layer
+weights must use Step interpolation within the bake range. This keeps every
+discrete change aligned with an explicit key time. Layers above the baked
+override can still use continuously animated weights on those channels.
+Between the checked positions, playback follows the baked curves. If the
+preview cannot satisfy the checks, it leaves the scene unchanged.
+
+Set Driven Key drivers or driven properties, IK blend, and transforms that
+feed enabled IK or constraints are outside this bake. The preview can sample
+up to 10,000 regular frames and produce up to 25,000 keys, with a 300,000 source
+curve evaluation limit and the normal scene animation limits.
+
+The options follow Maya 2026's [Merge Layers workflow](https://help.autodesk.com/cloudhelp/2026/ENU/Maya-Animation/files/GUID-9656522D-ED3B-4FAA-AA95-5167A7AC3482.htm)
+and its [Sample By and bottom placement options](https://help.autodesk.com/cloudhelp/2026/ENU/Maya-Animation/files/GUID-C7987782-C10D-433C-A78D-94C10D800608.htm).
+Musubi uses a text-labeled monochrome button for the options, an explicit
+preview, and an override result for the sampled stack.
+
+Open [examples/layer-flatten-study.msb](../examples/layer-flatten-study.msb),
+select **Animated Accent** and **Shape Override**, and bake frames 0–24. Keep
+**Retained Finish** to see how the upper layer still affects rotation.
+Regenerate the source with `node scripts/create-layer-flatten-example.mjs`.
+
 ## Graph Editor
 
 Select a channel in the list to make its curve active. **Selected targets**

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Splat Crop · Musubi Motion</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <a href="../">Tools</a>
+      <h1>Splat Crop</h1>
+      <a class="editor-link" href="../../">Open editor <span aria-hidden="true">↗</span></a>
+    </header>
+    <main>
+      <section class="source" aria-label="Source asset">
+        <div class="source-name">
+          <span id="asset-name">No capture open</span>
+          <span id="asset-meta">Binary Gaussian PLY · LF header</span>
+        </div>
+        <div class="source-actions">
+          <input id="source-file" type="file" accept=".ply" hidden>
+          <button id="open-file" type="button">Open PLY</button>
+          <button id="open-example" type="button">Load example</button>
+        </div>
+      </section>
+      <section class="workbench" aria-label="Crop workbench">
+        <div class="preview">
+          <div class="preview-title">
+            <h2>Center projections</h2>
+            <span>Drag in a view to set two bounds</span>
+          </div>
+          <div class="projections">
+            <figure>
+              <figcaption>Front <span>XY</span></figcaption>
+              <canvas id="front" role="img" aria-label="Front projection of Gaussian centers"></canvas>
+            </figure>
+            <figure>
+              <figcaption>Top <span>XZ</span></figcaption>
+              <canvas id="top" role="img" aria-label="Top projection of Gaussian centers"></canvas>
+            </figure>
+            <figure>
+              <figcaption>Side <span>YZ</span></figcaption>
+              <canvas id="side" role="img" aria-label="Side projection of Gaussian centers"></canvas>
+            </figure>
+          </div>
+          <div class="legend">
+            <span><i class="included"></i> Inside</span>
+            <span><i class="excluded"></i> Outside</span>
+            <span id="sample-label"></span>
+          </div>
+        </div>
+        <aside class="inspector" aria-labelledby="bounds-title">
+          <div class="inspector-title">
+            <h2 id="bounds-title">Crop bounds</h2>
+            <button id="fit-bounds" type="button" disabled>Reset</button>
+          </div>
+          <table aria-label="Source-space bounds">
+            <thead><tr><td></td><th scope="col">Min</th><th scope="col">Max</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">X</th><td><input id="min-x" type="number" step="any" aria-label="Minimum X" disabled></td><td><input id="max-x" type="number" step="any" aria-label="Maximum X" disabled></td></tr>
+              <tr><th scope="row">Y</th><td><input id="min-y" type="number" step="any" aria-label="Minimum Y" disabled></td><td><input id="max-y" type="number" step="any" aria-label="Maximum Y" disabled></td></tr>
+              <tr><th scope="row">Z</th><td><input id="min-z" type="number" step="any" aria-label="Minimum Z" disabled></td><td><input id="max-z" type="number" step="any" aria-label="Maximum Z" disabled></td></tr>
+            </tbody>
+          </table>
+          <div class="history">
+            <button id="undo" type="button" disabled>Undo</button>
+            <button id="redo" type="button" disabled>Redo</button>
+          </div>
+          <div class="export">
+            <h2>Download PLY</h2>
+            <div><span>Inside</span><output id="inside-count" aria-label="Inside splats">—</output></div>
+            <button id="export-inside" type="button" disabled>Download inside</button>
+            <div><span>Outside</span><output id="outside-count" aria-label="Outside splats">—</output></div>
+            <button id="export-outside" type="button" disabled>Download outside</button>
+          </div>
+        </aside>
+      </section>
+      <footer class="status-bar">
+        <p id="status" role="status">Open a capture or load the example.</p>
+        <progress id="progress" aria-label="Operation progress" max="1" hidden></progress>
+        <button id="cancel-job" type="button" hidden>Cancel</button>
+      </footer>
+    </main>
+    <script type="module" src="../../src/splat-ply-crop-page.ts"></script>
+  </body>
+</html>

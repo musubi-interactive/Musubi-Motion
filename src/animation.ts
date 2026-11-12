@@ -196,6 +196,31 @@ function bezierParameter(curve: CubicBezierCurve, fraction: number): number {
   return parameter;
 }
 
+/** Frames of interior value extrema, using the same weighted Bezier segment
+ * as playback. Useful where a narrow excursion may fall between time probes. */
+export function bezierTurningFrames(keys: readonly CurveKey[], start: number, end: number): number[] {
+  const frames: number[] = [];
+  const point = new Vector2();
+  for (let index = 0; index + 1 < keys.length; index++) {
+    const left = keys[index], right = keys[index + 1];
+    if (left.interpolation !== "bezier" || right.time <= start || left.time >= end) continue;
+    const curve = bezierSegment(keys, index);
+    const first = curve.v1.y - curve.v0.y;
+    const middle = curve.v2.y - curve.v1.y;
+    const last = curve.v3.y - curve.v2.y;
+    // The derivative divided by three is a quadratic in the curve parameter.
+    const a = first - 2 * middle + last, b = 2 * (middle - first), c = first;
+    const discriminant = b * b - 4 * a * c;
+    const q = discriminant >= 0 ? -.5 * (b + (b < 0 ? -1 : 1) * Math.sqrt(discriminant)) : 0;
+    const roots = a === 0 ? (b === 0 ? [] : [-c / b]) : (q === 0 ? [] : [q / a, c / q]);
+    for (const root of roots) if (root > 0 && root < 1) {
+      const frame = left.time + (right.time - left.time) * curve.getPoint(root, point).x;
+      if (frame > start && frame < end) frames.push(frame);
+    }
+  }
+  return frames;
+}
+
 export function evaluateCurve(keys: readonly CurveKey[], time: number): number | undefined {
   if (!Number.isFinite(time)) throw Error("Curve time must be finite.");
   if (!keys.length) return undefined;
@@ -353,7 +378,7 @@ function channelStack(doc: SceneDocument, id: string, channel: AnimationChannel,
     const isVariable = variable && active === layer.id;
     const value = track ? sample(track) : undefined;
     if (value === undefined && !isVariable) continue;
-    const w = weights?.get(layer) ?? layer.weight;
+    const w = weights?.get(layer) ?? (layer.weightTrack?.keys.length ? evaluateLayerWeight(layer, frame) : layer.weight);
     if (discrete) {
       if (w >= .5) { offset = isVariable ? 0 : value!; gain = isVariable ? 1 : 0; }
       continue;
@@ -368,6 +393,13 @@ function channelStack(doc: SceneDocument, id: string, channel: AnimationChannel,
     else offset += value! * w;
   }
   return { offset, gain };
+}
+
+/** Bake a stack segment before final channel clamping. The optional input is
+ * used to evaluate the remaining layers above a prospective baked curve. */
+export function createRawAnimationChannelSampler(doc: SceneDocument, id: string, channel: AnimationChannel) {
+  const fallback = readChannel(baseChannels(doc, id), channel);
+  return (frame: number, input = fallback) => channelStack(doc, id, channel, frame, input).offset;
 }
 function effectiveValue(channel: AnimationChannel, value: number): number {
   if (!finite(value)) throw Error("Animation layer evaluation exceeds the supported value range.");

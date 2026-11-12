@@ -1,0 +1,48 @@
+.splat-paint-panel {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  height: 100%;
+  overflow: auto;
+  padding: 8px;
+  font-size: 12px;
+}
+.splat-paint-panel p { margin: 0; }
+.splat-paint-panel p:empty { display: none; }
+.splat-paint-panel fieldset {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 6px;
+  border: 1px solid var(--wa-color-neutral-border-normal);
+}
+.splat-paint-panel label {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) minmax(60px, 1fr);
+  align-items: center;
+  gap: 6px;
+}
+.splat-paint-panel input[type=number] { text-align: right; }
+.splat-paint-panel input[type=checkbox] { justify-self: start; }
+.splat-paint-panel input, .splat-paint-panel select, .splat-paint-panel button {
+  min-width: 0;
+  min-height: 24px;
+  font: inherit;
+  color: inherit;
+  background: var(--wa-color-neutral-fill-quiet);
+  border: 1px solid var(--wa-color-neutral-border-normal);
+  border-radius: 3px;
+}
+.splat-paint-panel button { padding: 2px 6px; }
+.splat-paint-panel :disabled { opacity: .55; }
+.splat-paint-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+.splat-attribute-paint-cursor {
+  position: absolute;
+  pointer-events: none;
+  border: 1px solid white;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px #171717;
+  transform: translate(-50%, -50%);
+  z-index: 11;
+}

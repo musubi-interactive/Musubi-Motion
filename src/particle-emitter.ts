@@ -1,6 +1,9 @@
 import { normalizedChannels, uniqueName, type SceneDocument, type TransformChannels, type TransformNode, type Vec3 } from "./scene-document.ts";
 import type { SceneStore } from "./scene-store.ts";
 import { PARTICLE_MAP_PIXELS, validateParticleEmissionMap, validateParticleMapSource, type ParticleEmissionMap } from "./particle-map-emission.ts";
+import { compileGraph } from "./procedural-graph-runtime.ts";
+import { activeParticleGraphAppearance, activeParticleGraphField, MAX_PARTICLES_PER_GRAPH_FIELD, MAX_TOTAL_GRAPH_FIELD_PARTICLES, validateParticleGraphAppearance, validateParticleGraphField,
+  type ParticleGraphAppearance, type ParticleGraphField } from "./particle-map-fields.ts";
 
 export const MAX_PARTICLE_EMITTERS = 32;
 export const MAX_PARTICLES_PER_EMITTER = 20_000;
@@ -9,6 +12,8 @@ export const PARTICLE_STEP_SECONDS = 1 / 120;
 export type ParticleEmission = "omni" | "directional" | "box" | "sphere" | "surface";
 export type ParticleEmitterSettings = {
   emissionMap?: ParticleEmissionMap;
+  appearanceMap?: ParticleGraphAppearance;
+  forceField?: ParticleGraphField;
   enabled: boolean;
   emission: ParticleEmission;
   rate: number;
@@ -61,7 +66,11 @@ export function validateParticleShape(value: unknown): asserts value is Particle
     validateParticleEmissionMap(value.emissionMap);
     if (value.emission !== "surface") throw Error("Texture emission maps require a mesh surface emitter.");
   }
+  if (value.appearanceMap !== undefined) validateParticleGraphAppearance(value.appearanceMap);
+  if (value.forceField !== undefined) validateParticleGraphField(value.forceField);
   if (!numberIn(value.rate, 0, 10000) || !numberIn(value.lifetime, 0.01, 60)) throw Error("Emission rate must be 0–10,000 per second and lifetime 0.01–60 seconds.");
+  if (activeParticleGraphField(value.forceField) && potentialParticleCount({ rate: value.rate, lifetime: value.lifetime }) > MAX_PARTICLES_PER_GRAPH_FIELD)
+    throw Error("An emitter using a Texture Force Field supports at most 2,000 potential live particles.");
   if (!numberIn(value.startFrame, -100000, 100000) || !numberIn(value.endFrame, -100000, 100000) || !Number.isInteger(value.startFrame) || !Number.isInteger(value.endFrame) || value.endFrame <= value.startFrame) throw Error("Emission frames must be integers within ±100,000, with end after start.");
   if (!numberIn(value.seed, 0, 0xffffffff) || !Number.isInteger(value.seed)) throw Error("Particle seed must be an unsigned 32-bit integer.");
   if (!numberIn(value.speed, 0, 10000) || !numberIn(value.speedRandom, 0, 10000) || !numberIn(value.spread, 0, 1)) throw Error("Speed and speed variation must be 0–10,000; spread must be 0–1.");
@@ -78,27 +87,42 @@ export function validateParticleEmitters(doc: SceneDocument): void {
   if (emitters.length > MAX_PARTICLE_EMITTERS) throw Error("A scene supports at most 32 particle emitters.");
   const fps = doc.animation?.fps ?? 24;
   if (!numberIn(fps, 1, 240)) throw Error("Particle emission requires a valid scene FPS between 1 and 240.");
-  let total = 0, decodedPixels = 0;
+  let total = 0, totalFieldParticles = 0, decodedPixels = 0;
+  let graph: ReturnType<typeof compileGraph> | undefined;
   for (const shape of emitters) {
     validateParticleShape(shape);
     const parent = doc.nodes[shape.parentId];
     if (parent?.type !== "transform") throw Error("Particle emitter has no transform parent.");
+    const images = new Map<string, number>();
     if (shape.surfaceId !== undefined) {
       const source = doc.nodes[shape.surfaceId];
       if (source?.type !== "meshShape" || doc.nodes[source.parentId]?.type !== "transform") throw Error("Particle surface source must reference an existing polygon mesh shape.");
       if (parent.parentId !== source.parentId) throw Error("A surface emitter must remain parented beneath its source mesh transform.");
       if (shape.emissionMap) {
         const program = validateParticleMapSource(doc, shape.emissionMap, source);
-        decodedPixels += program?.images.reduce((sum, asset) => sum + asset.width * asset.height, 0) ?? 0;
-        if (decodedPixels > PARTICLE_MAP_PIXELS) throw Error("Particle emission maps exceed the scene's 8,388,608 decoded pixel budget (32 MiB). Resize map images or disable some texture emitters.");
+        for (const asset of program?.images ?? []) images.set(asset.id, asset.width * asset.height);
       }
     }
     if ((shape.endFrame - shape.startFrame) / fps > 300) throw Error("Particle emission duration cannot exceed 300 seconds at the scene FPS.");
     const potential = potentialParticleCount(shape);
     if (potential > MAX_PARTICLES_PER_EMITTER) throw Error("An emitter supports at most 20,000 potential live particles. Reduce its rate or lifetime.");
     total += potential;
+    const appearance = shape.appearanceMap, field = shape.forceField;
+    if (appearance?.enabled || field?.enabled) {
+      if (!doc.proceduralGraph) throw Error("Particle texture effects need a Texture Graph. Create one in View > Texture Graph.");
+      graph ??= compileGraph(doc.proceduralGraph, doc.textureAssets);
+      if (activeParticleGraphAppearance(appearance))
+        for (const asset of graph.appearanceImages) images.set(asset.id, asset.width * asset.height);
+      if (activeParticleGraphField(field)) {
+        totalFieldParticles += potential;
+        for (const asset of graph.fieldImages) images.set(asset.id, asset.width * asset.height);
+      }
+    }
+    for (const pixels of images.values()) decodedPixels += pixels;
+    if (decodedPixels > PARTICLE_MAP_PIXELS) throw Error("Particle texture maps exceed the scene's 8,388,608 decoded pixel budget (32 MiB). Resize images or disable some texture effects.");
   }
   if (total > MAX_TOTAL_PARTICLES) throw Error("A scene supports at most 100,000 potential live particles across all emitters.");
+  if (totalFieldParticles > MAX_TOTAL_GRAPH_FIELD_PARTICLES) throw Error("A scene supports at most 5,000 potential live particles across Texture Force Fields.");
 }
 
 export function findParticleShape(doc: SceneDocument, id: string): ParticleShapeNode | undefined {
@@ -121,6 +145,8 @@ export function createParticleEmitter(store: SceneStore, emission: ParticleEmiss
 
 const settingsKeys = new Set(Object.keys(defaultParticleSettings()));
 settingsKeys.add("emissionMap");
+settingsKeys.add("appearanceMap");
+settingsKeys.add("forceField");
 export function updateParticleEmitter(store: SceneStore, shapeId: string, patch: ParticleEmitterPatch): void {
   const doc = store.getState().document, shape = doc.nodes[shapeId];
   if (shape?.type !== "particleShape") throw Error("Choose a particle emitter shape.");

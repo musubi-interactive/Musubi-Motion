@@ -126,6 +126,8 @@ export function editSplatCollection(store: SceneStore, identity: SplatSelectionI
   return commit(store, identity, `${action === "rename" ? "Rename" : action === "delete" ? "Delete" : "Lock/Unlock"} splat ${kind}`, shape => {
     const field = kind === "set" ? "selectionSets" : "scalarMasks", entries = shape[field] ?? [], item = entries.find(item => item.id === id);
     if (!item) throw Error("Choose an existing set or mask."); if (item.locked && action !== "lock") throw Error("Unlock the collection first.");
+    if (kind === "mask" && action === "delete" && shape.appearance?.layers.some(layer => layer.maskId === id))
+      throw Error("The scalar mask is assigned to a splat appearance layer. Change the layer's mask before deleting it.");
     return { ...shape, [field]: action === "delete" ? entries.filter(item => item.id !== id) : entries.map(item => item.id !== id ? item : action === "lock" ? { ...item, locked: !!value } : { ...item, name: String(value).trim() }) };
   });
 }

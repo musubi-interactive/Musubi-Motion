@@ -48,6 +48,7 @@ function geometryFor(shape: MeshShapeNode) {
 export function createMeshRenderable(shape: MeshShapeNode, assets?: Readonly<Record<string, import("./texture-assets.ts").TextureAsset>>) {
   validateMeshShape(shape);
   let data = geometryFor(shape), previous = shape, disposed = false, previewing = false;
+  let topologyPreview: ReturnType<typeof geometryFor> | undefined;
   const material = new MeshStandardMaterial({ color: shape.color, roughness: .8, metalness: 0,
     side: DoubleSide, flatShading: shape.shading === "flat", polygonOffset: shape.wireframe, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
   let importedMaterials = shape.materials ? createMaterials(shape.materials, shape.shading === "flat", shape.wireframe, assets) : undefined;
@@ -79,7 +80,16 @@ export function createMeshRenderable(shape: MeshShapeNode, assets?: Readonly<Rec
   }
 
   function clearPreview(): void {
-    if (disposed || !previewing) return;
+    if (disposed) return;
+    if (topologyPreview) {
+      mesh.geometry = data.geometry;
+      edges.geometry = data.edges;
+      bounds.copy(data.committedBounds);
+      topologyPreview.geometry.dispose();
+      topologyPreview.edges.dispose();
+      topologyPreview = undefined;
+    }
+    if (!previewing) return;
     data.positions.set(data.committedPositions);
     const positions = mesh.geometry.getAttribute("position") as BufferAttribute, normals = mesh.geometry.getAttribute("normal") as BufferAttribute;
     normals.array.set(data.committedNormals);
@@ -92,8 +102,23 @@ export function createMeshRenderable(shape: MeshShapeNode, assets?: Readonly<Rec
 
   return {
     mesh, bounds,
-    get centers() { return data.positions; },
-    get triangleFaceIds() { return data.triangleFaceIds; },
+    get centers() { return (topologyPreview ?? data).positions; },
+    get triangleFaceIds() { return (topologyPreview ?? data).triangleFaceIds; },
+    /** Display validated transient topology while retaining the exact authored buffers. */
+    previewTopology(next: MeshShapeNode): void {
+      if (disposed || next.id !== previous.id || previous.skin || previous.morphTargets ||
+        next.materials !== previous.materials || next.normals !== previous.normals ||
+        next.uvs !== previous.uvs || next.uvSets !== previous.uvSets) {
+        throw Error("This mesh cannot preview replacement topology.");
+      }
+      validateMeshShape(next);
+      const replacement = geometryFor(next);
+      clearPreview();
+      topologyPreview = replacement;
+      mesh.geometry = replacement.geometry;
+      edges.geometry = replacement.edges;
+      bounds.copy(replacement.committedBounds);
+    },
     /** Transient absolute local edits use the committed tessellation throughout
      * a gesture. Full topology validation and retessellation belong to commit.
      * The returned shape is for overlays only and must not enter document state. */
@@ -114,6 +139,7 @@ export function createMeshRenderable(shape: MeshShapeNode, assets?: Readonly<Rec
         return position ? { ...vertex, position } : vertex;
       }) };
       if (!changes.length) { clearPreview(); return preview; }
+      if (topologyPreview) clearPreview();
       data.positions.set(data.committedPositions);
       for (const [id, position] of edits) data.positions.set(position, data.vertexIndices.get(id)! * 3);
       (mesh.geometry.getAttribute("position") as BufferAttribute).needsUpdate = true;
@@ -124,7 +150,7 @@ export function createMeshRenderable(shape: MeshShapeNode, assets?: Readonly<Rec
     },
     clearPreview,
     applySkin(world: (id: string) => Matrix4 | undefined, morphWeights?: number[]) {
-      if ((!previous.skin && !previous.morphTargets) || disposed || previewing) return;
+      if ((!previous.skin && !previous.morphTargets) || disposed || previewing || topologyPreview) return;
       deformMeshPositions(previous, world, data.positions, morphWeights);
       (mesh.geometry.getAttribute("position") as BufferAttribute).needsUpdate = true;
       recomputeNormals(); mesh.geometry.computeBoundingBox(); mesh.geometry.computeBoundingSphere();
@@ -134,6 +160,7 @@ export function createMeshRenderable(shape: MeshShapeNode, assets?: Readonly<Rec
     update(next: MeshShapeNode, nextAssets = assets) {
       if (disposed) throw Error("Cannot update a disposed mesh renderer.");
       validateMeshShape(next);
+      if (topologyPreview) clearPreview();
       if ((previous.skin && !next.skin) || (previous.morphTargets && !next.morphTargets)) { previewing = true; clearPreview(); }
       if (next.vertices !== previous.vertices || next.faces !== previous.faces || next.uvs !== previous.uvs || next.uvSets !== previous.uvSets || next.normals !== previous.normals || next.materials !== previous.materials) {
         const replacement = geometryFor(next), oldGeometry = mesh.geometry, oldEdges = edges.geometry;
@@ -152,7 +179,9 @@ export function createMeshRenderable(shape: MeshShapeNode, assets?: Readonly<Rec
       mesh.name = next.name; edges.visible = next.wireframe; previous = next;
     },
     dispose() {
-      if (disposed) return; disposed = true;
+      if (disposed) return;
+      clearPreview();
+      disposed = true;
       mesh.geometry.dispose(); edges.geometry.dispose(); if (importedMaterials) disposeMaterials(importedMaterials); material.dispose(); lineMaterial.dispose(); mesh.removeFromParent();
     },
   };

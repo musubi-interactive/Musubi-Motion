@@ -3,6 +3,8 @@ import { findMeshShape } from "./mesh-modeling.ts";
 import type { SceneDocument, Vec3 } from "./scene-document.ts";
 import type { SceneStore } from "./scene-store.ts";
 import { defaultParticleEmissionMap, type ParticleEmissionMap } from "./particle-map-emission.ts";
+import { defaultParticleGraphAppearance, defaultParticleGraphField, MAX_PARTICLE_FIELD_STRENGTH,
+  type ParticleGraphAppearance, type ParticleGraphField } from "./particle-map-fields.ts";
 import { propertyInteraction } from "./property-interaction.ts";
 
 type Options = {
@@ -167,6 +169,40 @@ export function createParticlePanel(store: SceneStore, options: Options) {
     const opacities: [number, number] = [...shape.opacities]; opacities[side] = value; return { opacities };
   }, 0, 1);
   appearance.append(opacity);
+  const appearanceOf = (shape: ParticleShapeNode) => shape.appearanceMap ?? defaultParticleGraphAppearance();
+  const fieldOf = (shape: ParticleShapeNode) => shape.forceField ?? defaultParticleGraphField();
+  const appearancePatch = (shape: ParticleShapeNode, value: Partial<ParticleGraphAppearance>): ParticleEmitterPatch =>
+    ({ appearanceMap: { ...appearanceOf(shape), ...value } });
+  const fieldPatch = (shape: ParticleShapeNode, value: Partial<ParticleGraphField>): ParticleEmitterPatch =>
+    ({ forceField: { ...fieldOf(shape), ...value } });
+  function graphToggle(parent: HTMLElement, title: string, change: (checked: boolean) => ParticleEmitterPatch) {
+    const input = document.createElement("input"); input.type = "checkbox"; input.setAttribute("aria-label", title);
+    const row = label(title, input); row.className = "particle-check"; parent.append(row);
+    input.onchange = () => run(() => patch(change(input.checked)));
+    return input;
+  }
+  function graphSpace(parent: HTMLElement, title: string, change: (space: ParticleGraphField["space"]) => ParticleEmitterPatch) {
+    const input = select(title); input.add(new Option("World", "world")); input.add(new Option("Emitter", "emitter"));
+    parent.append(label(title, input));
+    input.onchange = () => run(() => patch(change(input.value as ParticleGraphField["space"])));
+    return input;
+  }
+  const textureAppearance = details("Texture Appearance"), textureField = details("Texture Force Field");
+  const textureAppearanceEnabled = graphToggle(textureAppearance, "Enable texture appearance", enabled => appearancePatch(current(), { enabled }));
+  const textureAppearanceSpace = graphSpace(textureAppearance, "Appearance sample space", space => appearancePatch(current(), { space }));
+  const appearanceChannels = (["color", "opacity", "size"] as const).map(channel =>
+    ({ channel, input: graphToggle(textureAppearance, "Map particle " + channel, value => appearancePatch(current(), { [channel]: value })) }));
+  bindNumber(textureAppearance, "Texture appearance blend", shape => appearanceOf(shape).blend,
+    (shape, blend) => appearancePatch(shape, { blend }), 0, 1, "0.01");
+  textureAppearance.append(note("Use View > Texture Graph. Output Color blends in linear RGB. Output Alpha and Size multiply the existing opacity and diameter. UV U follows normalized age."));
+  appearance.append(textureAppearance);
+
+  const textureFieldEnabled = graphToggle(textureField, "Enable texture force field", enabled => fieldPatch(current(), { enabled }));
+  const textureFieldSpace = graphSpace(textureField, "Field sample space", space => fieldPatch(current(), { space }));
+  bindNumber(textureField, "Texture force strength", shape => fieldOf(shape).strength,
+    (shape, strength) => fieldPatch(shape, { strength }), -MAX_PARTICLE_FIELD_STRENGTH, MAX_PARTICLE_FIELD_STRENGTH, "0.1");
+  textureField.append(note("Connect Vector 3 to Texture Graph Output Field. Strength is acceleration in world units per second squared. Time samples each historical step. Use Multiply to vary the field over time."));
+  dynamics.append(textureField);
   fields.append(summary, runtime, emission, dynamics, appearance);
   const help = note("Emitter properties are static saved settings. Animate the emitter's transform with Properties and the timeline. Particles already born stay in world space. Changes replay the seeded simulation; pending results appear in the runtime status.");
   element.append(style, creation, label("Emitter", emitters), empty, fields, status, help);
@@ -203,6 +239,10 @@ export function createParticlePanel(store: SceneStore, options: Options) {
       : "Create at the origin, then position the emitter with the normal object transform tools.";
     if (!shape) { runtime.textContent = ""; return; }
     enabled.checked = shape.enabled;
+    const appearanceEffect = appearanceOf(shape), fieldEffect = fieldOf(shape);
+    textureAppearanceEnabled.checked = appearanceEffect.enabled; textureAppearanceSpace.value = appearanceEffect.space;
+    for (const { channel, input } of appearanceChannels) input.checked = appearanceEffect[channel];
+    textureFieldEnabled.checked = fieldEffect.enabled; textureFieldSpace.value = fieldEffect.space;
     mapSection.hidden = shape.emission !== "surface";
     const m = mapOf(shape), assetList = Object.values(doc.textureAssets ?? {}), signature = JSON.stringify(assetList.map(a => [a.id, a.name]));
     if (signature !== assetsSignature) { assetsSignature = signature; mapImage.replaceChildren(new Option("Choose an imported image", ""), ...assetList.map(a => new Option(a.name, a.id))); }

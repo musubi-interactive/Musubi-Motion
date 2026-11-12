@@ -1,3 +1,4 @@
+import { validateSceneSplatAppearance } from "./splat-appearance.ts";
 import type { SceneDocument } from "./scene-document.ts";
 import type { SceneStore } from "./scene-store.ts";
 import type { TextureAsset } from "./texture-assets.ts";
@@ -9,6 +10,8 @@ export const GRAPH_KINDS = {
   uv: "UV",
   position: "Position",
   time: "Time",
+  particle: "Particle Attributes",
+  vector: "Vector 3",
   noise: "Noise",
   gradient: "Gradient / Ramp",
   add: "Add",
@@ -25,6 +28,8 @@ type Params = {
   uv: Record<string, never>;
   position: Record<string, never>;
   time: Record<string, never>;
+  particle: Record<string, never>;
+  vector: Record<string, never>;
   noise: { seed: number; scale: number; speed: number };
   gradient: { start: Color; end: Color };
   add: { type: PortType; a: number; b: number };
@@ -47,6 +52,8 @@ const defaults: Params = {
   uv: {},
   position: {},
   time: {},
+  particle: {},
+  vector: {},
   noise: { seed: 1, scale: 6, speed: 1 },
   gradient: { start: [0.025, 0.06, 0.22], end: [1, 0.58, 0.15] },
   add: { type: "scalar", a: 0, b: 0 },
@@ -67,7 +74,9 @@ export function inputPorts(node: GraphNode): readonly InputPort[] {
     case "add":
     case "multiply": return ["a", "b"].map(name => ({ name, types: [node.params.type, "scalar"] }));
     case "clamp": return [{ name: "value", types: [node.params.type, "scalar"] }, { name: "min", types: ["scalar"] }, { name: "max", types: ["scalar"] }];
-    case "output": return [{ name: "color", types: ["color", "scalar"] }, { name: "alpha", types: ["scalar"] }];
+    case "vector": return ["x", "y", "z"].map(name => ({ name, types: ["scalar"] }));
+    case "output": return [{ name: "color", types: ["color", "scalar"] }, { name: "alpha", types: ["scalar"] },
+      { name: "size", types: ["scalar"] }, { name: "field", types: ["vec3"] }];
     default: return [];
   }
 }
@@ -76,6 +85,8 @@ export function outputPorts(node: GraphNode): readonly OutputPort[] {
     case "texture": return [{ name: "color", type: "color" }, { name: "alpha", type: "scalar" }];
     case "uv": return [{ name: "uv", type: "vec2" }];
     case "position": return [{ name: "position", type: "vec3" }];
+    case "particle": return ["age", "lifetime", "normalizedAge"].map(name => ({ name, type: "scalar" }));
+    case "vector": return [{ name: "vector", type: "vec3" }];
     case "gradient": return [{ name: "color", type: "color" }];
     case "time":
     case "noise": return [{ name: "value", type: "scalar" }];
@@ -244,6 +255,7 @@ export function commitGraphCommand(store: SceneStore, name: string, edit: (graph
   if (graph === before.proceduralGraph) return;
   if (graph) validateProceduralGraph(graph, before.textureAssets);
   const next: SceneDocument = { ...before, proceduralGraph: graph };
+  validateSceneSplatAppearance(next);
   validateParticleEmitters(next);
   store.setState({ document: next, editLabel: name });
 }

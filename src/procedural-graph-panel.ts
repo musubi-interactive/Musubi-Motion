@@ -11,7 +11,7 @@ import type { SceneStore } from "./scene-store.ts";
 import { createGraphCanvas, GRAPH_NODE_WIDTH, type GraphSelection } from "./procedural-graph-canvas.tsx";
 import "./procedural-graph.css";
 
-type Options = { available(): boolean; time(): { frame: number; fps: number } };
+type Options = { available(): boolean; time(): { frame: number; fps: number }; onDraft?: () => void };
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const portLabel = (name: string) => name.length === 1 ? name.toUpperCase() : name[0].toUpperCase() + name.slice(1);
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string) {
@@ -83,6 +83,11 @@ export function createProceduralGraphPanel(store: SceneStore, options: Options) 
   const graph = () => doc().proceduralGraph;
   let selected: GraphSelection | undefined;
   let draft: { doc: SceneDocument; graph: ProceduralGraph } | undefined;
+  function setDraft(next: typeof draft) {
+    if (draft === next) return;
+    draft = next;
+    options.onDraft?.();
+  }
   let propertiesKey = "", propertiesAssets: SceneDocument["textureAssets"];
   let controls: { refresh(node: GraphNode): void }[] = [];
   let visible = false, queued = false, rendering = false, contextLost = false;
@@ -108,6 +113,7 @@ export function createProceduralGraphPanel(store: SceneStore, options: Options) 
   }
   function choose(selection?: GraphSelection) {
     selected = selection;
+    setDraft(undefined);
     syncCanvas();
     syncInspector();
   }
@@ -219,11 +225,11 @@ export function createProceduralGraphPanel(store: SceneStore, options: Options) 
       const draftValue = (value: number) => {
         const scene = doc();
         if (!options.available() || !scene.proceduralGraph || !Number.isFinite(value) || value < min || value > max || step === 1 && !Number.isInteger(value)) return;
-        draft = { doc: scene, graph: editGraphNode(scene.proceduralGraph, node.id, current => change(current, value)) };
+        setDraft({ doc: scene, graph: editGraphNode(scene.proceduralGraph, node.id, current => change(current, value)) });
         queuePreview();
       };
       const restore = () => {
-        draft = undefined;
+        setDraft(undefined);
         const current = selectedNode();
         if (current?.id === node.id) input.value = String(read(current));
         queuePreview();
@@ -231,7 +237,7 @@ export function createProceduralGraphPanel(store: SceneStore, options: Options) 
       input.oninput = () => draftValue(input.valueAsNumber);
       input.onchange = () => {
         const value = input.valueAsNumber;
-        draft = undefined;
+        setDraft(undefined);
         if (Number.isFinite(value)) update("Set " + name, current => change(current, value));
         else report("Enter a number for " + name + ".");
         restore();
@@ -247,7 +253,7 @@ export function createProceduralGraphPanel(store: SceneStore, options: Options) 
       row.addEventListener("pointerdown", event => { if (event.button === 1 && !input.disabled) input.focus(); }, true);
       const refreshLock = propertyInteraction(input, () => "texture-graph:" + node.id + ":" + name, row, () => ({
         update: draftValue,
-        end() { draft = undefined; queuePreview(); },
+        end() { setDraft(undefined); queuePreview(); },
       }));
       controls.push({ refresh(value) {
         if (document.activeElement !== input && !draft) input.value = String(read(value));
@@ -290,10 +296,15 @@ export function createProceduralGraphPanel(store: SceneStore, options: Options) 
         (current, type) => isMath(current) ? { ...current, params: { ...current.params, type } } as GraphNode : current);
       for (const key of node.kind === "clamp" ? ["value", "min", "max"] : ["a", "b"]) scalar(key, -1024, 1024, 0.1, key);
     }
-    if (node.kind === "output") scalar("alpha", 0, 1, 0.01, "alpha");
-    if (node.kind === "time") inspector.append(element("p", undefined, "Seconds = timeline frame ÷ FPS."));
+    if (node.kind === "output") {
+      scalar("alpha", 0, 1, 0.01, "alpha");
+      inspector.append(element("p", undefined, "Particles use Size as a diameter multiplier and Field as a signed XYZ vector."));
+    }
+    if (node.kind === "time") inspector.append(element("p", undefined, "Seconds = timeline frame ÷ FPS. Particle fields use historical simulation steps."));
     if (node.kind === "uv") inspector.append(element("p", undefined, "Normalized UV. The origin is at the lower left."));
     if (node.kind === "position") inspector.append(element("p", undefined, "Preview plane position is (U, V, 0)."));
+    if (node.kind === "particle") inspector.append(element("p", undefined, "Age and Lifetime are seconds. Normalized Age runs from 0 to 1. Preview uses a one-second ramp across U."));
+    if (node.kind === "vector") inspector.append(element("p", undefined, "Combine signed scalar X, Y and Z values into a 3D vector."));
   }
 
   root.addEventListener("keydown", event => {
@@ -367,14 +378,14 @@ export function createProceduralGraphPanel(store: SceneStore, options: Options) 
   new IntersectionObserver(entries => {
     visible = entries.some(entry => entry.isIntersecting);
     if (visible) queuePreview();
-    else { draft = undefined; }
+    else setDraft(undefined);
   }).observe(root);
 
   let lastDoc: SceneDocument | undefined, lastAvailable: boolean | undefined;
   function refresh() {
     const scene = doc(), value = graph(), available = options.available();
     if (lastDoc !== scene || lastAvailable !== available) {
-      draft = undefined;
+      setDraft(undefined);
       if (selected) {
         const item = selected;
         const exists = "node" in item
@@ -395,5 +406,5 @@ export function createProceduralGraphPanel(store: SceneStore, options: Options) 
     queuePreview();
   }
   refresh();
-  return { element: root, refresh };
+  return { element: root, refresh, previewGraph };
 }

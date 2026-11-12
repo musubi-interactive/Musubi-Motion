@@ -1,15 +1,26 @@
 import { propertyInteraction } from "./property-interaction.ts";
-import type { SplatSoftSettings } from "./splat-soft-selection.ts";
+import { createSoftFalloffEditor, type SoftFalloffPreview } from "./soft-falloff-editor.ts";
+import { defaultSoftFalloffCurve, type SplatSoftSettings } from "./splat-soft-selection.ts";
 export type SplatSoftField = "worldRadius" | "screenRadius" | "core" | "x" | "y" | "z";
 export function createSplatSoftPanel(actions: {
   change(patch: Partial<SplatSoftSettings>): void;
   preview(field: SplatSoftField): { update(value: number): void; end(): void } | undefined;
+  previewCurve(): SoftFalloffPreview | undefined;
   apply(): void;
 }) {
   const element = document.createElement("fieldset"); element.className = "splat-edit-actions splat-soft-settings";
-  element.innerHTML = `<legend>Sphere / Radial Falloff</legend><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" aria-label="Soft Selection">Soft Selection (B)</label><label>Falloff curve <select aria-label="Splat falloff curve"><option value="linear">Linear</option><option value="smooth">Smooth</option><option value="sharp">Sharp</option></select></label>`;
+  element.innerHTML = `<legend>Sphere / Radial Falloff</legend><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" aria-label="Soft Selection">Soft Selection (B)</label><label>Falloff curve <select aria-label="Splat falloff curve"><option value="linear">Linear</option><option value="smooth">Smooth</option><option value="sharp">Sharp</option><option value="custom">Custom</option></select></label>`;
   const enabled = element.querySelector<HTMLInputElement>("input")!, curve = element.querySelector<HTMLSelectElement>("select")!;
-  enabled.onchange = () => actions.change({ enabled: enabled.checked }); curve.onchange = () => actions.change({ curve: curve.value as SplatSoftSettings["curve"] });
+  const initialCurve = defaultSoftFalloffCurve();
+  const editor = createSoftFalloffEditor({ change: points => actions.change({ curve: "custom", customCurve: points }), preview: actions.previewCurve });
+  element.append(editor.element);
+  enabled.onchange = () => actions.change({ enabled: enabled.checked });
+  curve.onchange = () => {
+    if (curve.value === "custom") {
+      editor.element.open = true;
+      actions.change({ curve: "custom", customCurve: settings.customCurve ?? initialCurve });
+    } else actions.change({ curve: curve.value as SplatSoftSettings["curve"] });
+  };
   let settings: SplatSoftSettings;
   const inputs = new Map<SplatSoftField, HTMLInputElement>();
   const read = (field: SplatSoftField) => field === "x" || field === "y" || field === "z" ? settings.center["xyz".indexOf(field)] : settings[field];
@@ -46,8 +57,12 @@ export function createSplatSoftPanel(actions: {
   return { element, update(value: SplatSoftSettings, available: boolean, busy: boolean, tool: string, count: number) {
     settings = value; enabled.checked = value.enabled; curve.value = value.curve;
     enabled.disabled = curve.disabled = !available;
+    const custom = value.curve === "custom", regionTool = tool === "sphere" || tool === "radial";
+    editor.element.hidden = !custom;
+    editor.update(value.customCurve ?? initialCurve, available && custom && regionTool);
+    inputs.get("core")!.closest("label")!.style.display = custom ? "none" : "grid";
     for (const [field, input] of inputs) { input.disabled = !available; if (document.activeElement !== input) input.value = String(read(field)); }
-    apply.disabled = !available || busy || tool !== "sphere" && tool !== "radial";
+    apply.disabled = !available || busy || !regionTool;
     status.textContent = `${tool === "sphere" ? `3D sphere · r ${value.worldRadius} world units` : tool === "radial" ? `2D circle · r ${value.screenRadius} CSS px` : "Choose Sphere or Radial above"} · ${value.enabled ? value.curve + " falloff" : "hard selection"} · ${count.toLocaleString()} affected IDs${busy ? " · scanning…" : ""}`;
   } };
 }

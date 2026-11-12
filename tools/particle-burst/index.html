@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="/favicon.svg">
+  <title>Particle Burst Baker · Musubi Motion</title>
+</head>
+<body>
+  <header class="toolbar">
+    <a class="home" href="../">Musubi Tools</a>
+    <h1>Particle Burst Baker</h1>
+    <div class="actions" role="group" aria-label="Recipe actions">
+      <button id="open" type="button">Open Recipe</button>
+      <input id="recipe-file" type="file" accept=".json,application/json" hidden>
+      <button id="save" type="button">Save Recipe</button>
+      <button id="undo" type="button" title="Undo (Ctrl/Cmd+Z)">Undo</button>
+      <button id="redo" type="button" title="Redo (Ctrl/Cmd+Shift+Z)">Redo</button>
+      <button id="theme" type="button">Theme: System</button>
+    </div>
+  </header>
+  <main class="workbench">
+    <section class="preview" aria-label="Burst preview and playback">
+      <div id="viewport" class="viewport"></div>
+      <div class="transport" role="group" aria-label="Playback">
+        <button id="play" type="button">Play</button>
+        <button id="frame-view" type="button" title="Fit the visible particles in the preview">Frame Burst</button>
+        <label class="timeline-label" for="timeline">Frame</label>
+        <input id="timeline" type="range" min="0" max="60" value="24" step="1" aria-label="Timeline frame">
+        <input id="frame" type="number" min="0" max="60" value="24" step="1" aria-label="Frame number">
+      </div>
+      <div class="output">
+        <span id="count"></span>
+        <button id="export" type="button">Bake Frame to PLY</button>
+      </div>
+      <p id="status" role="status"></p>
+    </section>
+    <aside id="settings" class="settings" aria-label="Burst settings"></aside>
+  </main>
+  <script type="module" src="../../src/particle-burst/app.ts"></script>
+</body>
+</html>

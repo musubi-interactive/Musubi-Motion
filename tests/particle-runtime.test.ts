@@ -117,16 +117,38 @@ describe("asynchronous particle runtime", () => {
     expect(cloud.geometry.drawRange.count).toBe(0); expect(runtime.mesh.parent).toBeNull();
   });
 
-  it("clears the displayed future cloud immediately during backward replay", async () => {
+  it("keeps the last complete cloud during backward replay and supersession", async () => {
     const fake = simulation(); factory.mockReturnValue(fake);
     const { doc, shape, sampler, runtime, changed, cloud } = fixture();
     runtime.request(doc, shape, 48, sampler, changed); await resolve(fake.jobs[0], frame(48, 3));
     expect(cloud.geometry.drawRange.count).toBe(3);
     runtime.request(doc, shape, 12, sampler, changed);
-    expect(cloud.geometry.drawRange.count).toBe(0); expect(runtime.status).toEqual({ count: 0, pending: true, error: undefined });
+    expect(cloud.geometry.drawRange.count).toBe(3); expect(runtime.status).toEqual({ count: 3, pending: true, error: undefined });
     expect(factory).toHaveBeenCalledTimes(1);
-    await resolve(fake.jobs[1], frame(12));
-    expect(runtime.status).toEqual({ count: 1, pending: false }); expect(cloud.geometry.getAttribute("position").getX(0)).toBe(12); runtime.dispose();
+    runtime.request(doc, shape, 16, sampler, changed);
+    await reject(fake.jobs[1], new DOMException("Superseded", "AbortError"));
+    expect(runtime.status.pending).toBe(true); expect(cloud.geometry.getAttribute("position").getX(0)).toBe(48);
+    await resolve(fake.jobs[2], frame(16));
+    expect(runtime.status).toEqual({ count: 1, pending: false }); expect(cloud.geometry.getAttribute("position").getX(0)).toBe(16); runtime.dispose();
+  });
+
+  it("disposes preview state on cancellation and keeps the last valid display while restoring authored state", async () => {
+    const authored = simulation(), preview = simulation(), restored = simulation();
+    factory.mockReturnValueOnce(authored).mockReturnValueOnce(preview).mockReturnValueOnce(restored);
+    const { doc, shape, sampler, runtime, changed, cloud } = fixture();
+    runtime.request(doc, shape, 24, sampler, changed); await resolve(authored.jobs[0], frame(24));
+    const draftShape = { ...shape, seed: shape.seed + 1 };
+    const draft = { ...doc, nodes: { ...doc.nodes, [shape.id]: draftShape } };
+    runtime.request(draft, draftShape, 24, createParticlePoseSampler(draft), changed);
+    runtime.request(doc, shape, 24, sampler, changed);
+    expect(authored.dispose).toHaveBeenCalledTimes(1); expect(preview.dispose).toHaveBeenCalledTimes(1);
+    await resolve(preview.jobs[0], frame(123, 3));
+    expect(cloud.geometry.getAttribute("position").getX(0)).toBe(24);
+    await reject(restored.jobs[0], new DOMException("Interrupted", "AbortError"));
+    expect(runtime.status).toEqual({ count: 1, pending: false });
+    runtime.request(doc, shape, 24, sampler, changed);
+    await resolve(restored.jobs[1], frame(24));
+    expect(cloud.geometry.getAttribute("position").getX(0)).toBe(24); runtime.dispose();
   });
 
   it("clears the visible cloud and reports a latest-request async error without reviving older output", async () => {
@@ -138,5 +160,20 @@ describe("asynchronous particle runtime", () => {
     expect(runtime.status).toEqual({ count: 0, pending: false, error: "Replay failed" }); expect(cloud.geometry.drawRange.count).toBe(0);
     await resolve(fake.jobs[1], frame(24, 2));
     expect(runtime.status.error).toBe("Replay failed"); expect(cloud.geometry.drawRange.count).toBe(0); expect(changed).toHaveBeenCalledTimes(2); runtime.dispose();
+  });
+
+  it("keeps the last complete cloud when a particle texture effect cannot evaluate", async () => {
+    const old = simulation(), invalid = simulation();
+    factory.mockReturnValueOnce(old).mockReturnValueOnce(invalid);
+    const { doc, shape, sampler, runtime, changed, cloud } = fixture();
+    runtime.request(doc, shape, 12, sampler, changed);
+    await resolve(old.jobs[0], frame(12, 2));
+    const nextShape = { ...shape, forceField: { enabled: true, space: "world" as const, strength: 3 } };
+    const nextDoc = { ...doc, nodes: { ...doc.nodes, [shape.id]: nextShape } };
+    runtime.request(nextDoc, nextShape, 24, createParticlePoseSampler(nextDoc), changed);
+    await reject(invalid.jobs[0], Error("Texture Graph returned a non-finite particle force."));
+    expect(runtime.status).toEqual({ count: 2, pending: false, error: "Texture Graph returned a non-finite particle force." });
+    expect(cloud.geometry.getAttribute("position").getX(0)).toBe(12);
+    runtime.dispose();
   });
 });

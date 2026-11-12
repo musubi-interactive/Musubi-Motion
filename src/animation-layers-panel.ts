@@ -1,7 +1,20 @@
 import { addAnimationLayer, setActiveAnimationLayer, updateAnimationLayer, reorderAnimationLayer, removeAnimationLayer, setLayerWeightKey, deleteLayerWeightKey, clearLayerWeightCurve, replaceLayerWeightTrack } from "./animation-layers.ts";
 import { evaluateLayerWeight, tangentSlope, withTangent, type CurveKey, type LayerWeightTrack } from "./animation.ts";
 import { propertyInteraction } from "./property-interaction.ts";
+import { createAnimationLayerFlattenPanel } from "./animation-layer-flatten-panel.ts";
 import type { SceneStore } from "./scene-store.ts";
+
+function hasWeightKeyAtFrame(keys: readonly CurveKey[], frame: number): boolean {
+  let low = 0, high = keys.length;
+  while (low < high) {
+    const index = (low + high) >>> 1;
+    const time = keys[index].time;
+    if (time === frame) return true;
+    if (time < frame) low = index + 1;
+    else high = index;
+  }
+  return false;
+}
 
 export function createAnimationLayersPanel(store: SceneStore, options: { available(): boolean; getFrame?(): number; onActiveChange(): void; onStatus?(message: string): void }) {
   const element = document.createElement("section"); element.className = "animation-layers-panel"; element.setAttribute("aria-label", "Animation layers");
@@ -32,7 +45,8 @@ export function createAnimationLayersPanel(store: SceneStore, options: { availab
   const keyFields=document.createElement("div");keyFields.className="weight-key-fields";keyFields.append(label("Frame",selectedFrame),label("Value",selectedValue));
   let selectedKeyId="",keyOwnerId="";
   let observedTrack:LayerWeightTrack|undefined,listedTrack:LayerWeightTrack|undefined,listedOwner="";
-  let keyById=new Map<string,CurveKey>();
+  const keyIndexById = new Map<string, number>();
+  let listedSelection: string | undefined;
   const selectedKey=()=>store.getState().document.animation?.layers?.find(layer=>layer.id===active.value)?.weightTrack?.keys.find(key=>key.id===selectedKeyId);
   function editSelectedKey(patch:Partial<CurveKey>){
     const layer=store.getState().document.animation?.layers?.find(layer=>layer.id===active.value),track=layer?.weightTrack;
@@ -79,7 +93,7 @@ export function createAnimationLayersPanel(store: SceneStore, options: { availab
   tangentDetails.append(tangentHeading,label("Preset",tangentPreset),label("Tangents",tangentLink),tangentFields,tangentHelp);
   const removeSelected=button("Remove selected weight key",()=>{const key=selectedKey();if(key)deleteLayerWeightKey(store,active.value,key.time);});
   keyDetails.ontoggle=()=>refresh();
-  keyList.onchange=()=>{selectedKeyId=keyList.value;refresh();};
+  keyList.onchange=()=>{selectedKeyId=listedSelection=keyList.value;refresh();};
   selectedFrame.onchange=()=>{if(!cancelField&&!selectedFrame.readOnly)run(()=>editSelectedKey({time:selectedFrame.valueAsNumber}));};
   selectedValue.onchange=()=>{if(!cancelField&&!selectedValue.readOnly)run(()=>editSelectedKey({value:selectedValue.valueAsNumber}));};
   selectedInterpolation.onchange=()=>run(()=>editSelectedKey({interpolation:selectedInterpolation.value as CurveKey["interpolation"]}));
@@ -102,7 +116,8 @@ export function createAnimationLayersPanel(store: SceneStore, options: { availab
   weight.onchange=()=>{if(!cancelField)run(()=>updateAnimationLayer(store,active.value,{weight:weight.valueAsNumber}));};
   checks.forEach(({text,node})=>node.onchange=()=>run(()=>updateAnimationLayer(store,active.value,{[text.toLowerCase()]:node.checked})));
   [name,weight,keyValue,selectedFrame,selectedValue,...tangentNumbers.map(item=>item.node)].forEach(node=>node.addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();node.blur();}else if(event.key==="Escape"){event.preventDefault();cancelField=true;node.blur();cancelField=false;sampleSignature="";refresh();}}));
-  element.append(style,intro,label("Active layer",active),summary,add,up,down,remove,label("Name",name),label("Blend mode",mode),label("Fallback weight",weight),sampled,label("Weight key value",keyValue),actions,keyDetails,...checks.map(check=>check.row),help,status);
+  const flatten = createAnimationLayerFlattenPanel(store, { available: options.available, onBaked: options.onActiveChange, focusFallback: () => active.focus(), onStatus: options.onStatus });
+  element.append(style,intro,label("Active layer",active),summary,add,up,down,remove,flatten.element,label("Name",name),label("Blend mode",mode),label("Fallback weight",weight),sampled,label("Weight key value",keyValue),actions,keyDetails,...checks.map(check=>check.row),help,status);
   const refreshWeightLock=propertyInteraction(weight,()=>`layer:${active.value}:weight`);
   const refreshKeyLock=propertyInteraction(keyValue,()=>`layer:${active.value}:key-value`);
   [selectedFrame,selectedValue,...tangentNumbers.map(item=>item.node)].forEach(node=>node.addEventListener("pointerdown",event=>{if(event.button===1&&!node.disabled&&!node.readOnly)node.focus();}));
@@ -125,23 +140,26 @@ export function createAnimationLayersPanel(store: SceneStore, options: { availab
     const available=options.available();active.disabled=add.disabled=!available;
     [name,mode,weight,...checks.map(check=>check.node)].forEach(node=>node.disabled=!available||!layer);
     weight.disabled=keyValue.disabled=setWeightKey.disabled=!available||!layer||layer.locked===true;
-    deleteWeightKey.disabled=!available||!layer||layer.locked||!layer.weightTrack?.keys.some(key=>key.time===Math.round(current));
-    clearWeight.disabled=!available||!layer||layer.locked||!layer.weightTrack?.keys.length;
     const track=layer?.weightTrack,keys=track?.keys??[];
+    deleteWeightKey.disabled=!available||!layer||layer.locked||!hasWeightKeyAtFrame(keys,Math.round(current));
+    clearWeight.disabled=!available||!layer||layer.locked||!keys.length;
     if(keyOwnerId!==id||observedTrack!==track){
       if(keyOwnerId!==id)selectedKeyId="";
       keyOwnerId=id;observedTrack=track;
-      keyById=new Map(keys.map(key=>[key.id,key]));
-      if(!keyById.has(selectedKeyId))selectedKeyId=keys[0]?.id??"";
+      keyIndexById.clear();
+      keys.forEach((key,index)=>keyIndexById.set(key.id,index));
+      if(!keyIndexById.has(selectedKeyId))selectedKeyId=keys[0]?.id??"";
     }
     // Build the native list only when disclosed and its immutable source changes.
     if(keyDetails.open&&(listedTrack!==track||listedOwner!==id)){
       const choices=document.createDocumentFragment();
       keys.forEach(key=>choices.append(new Option(`Frame ${key.time} · ${key.value} · ${key.interpolation}`,key.id)));
       keyList.replaceChildren(choices);listedTrack=track;listedOwner=id;
+      listedSelection=undefined;
     }
-    keyList.value=selectedKeyId;
-    const key=keyById.get(selectedKeyId);
+    // Assigning the native select's value searches its options, even if it already matches.
+    if(listedSelection!==selectedKeyId){keyList.value=selectedKeyId;listedSelection=selectedKeyId;}
+    const selectedIndex=keyIndexById.get(selectedKeyId)??-1,key=keys[selectedIndex];
     if(document.activeElement!==selectedFrame)selectedFrame.value=key?String(key.time):"";
     if(document.activeElement!==selectedValue)selectedValue.value=key?String(key.value):"";
     selectedInterpolation.value=key?.interpolation??"linear";
@@ -150,7 +168,6 @@ export function createAnimationLayersPanel(store: SceneStore, options: { availab
     refreshSelectedFrameLock();refreshSelectedValueLock();
     tangentPreset.value=key?.tangentMode??"auto";tangentLink.value=key?.broken?"broken":"linked";
     tangentPreset.disabled=tangentLink.disabled=selectedInterpolation.disabled;
-    const selectedIndex=keys.findIndex(item=>item.id===selectedKeyId);
     tangentNumbers.forEach(({field,node})=>{
       if(document.activeElement!==node)node.value=key?String(field.endsWith("Slope")?tangentSlope(keys,selectedIndex,field.startsWith("in")?"in":"out"):key[field]??1/3):"";
       node.disabled=selectedInterpolation.disabled;
@@ -158,6 +175,7 @@ export function createAnimationLayersPanel(store: SceneStore, options: { availab
     refreshTangentLocks.forEach(refreshLock=>refreshLock());
     const index=layers.findIndex(layer=>layer.id===id);up.disabled=!available||index<=0;down.disabled=!available||index<0||index===layers.length-1;remove.disabled=!available||!layer||layer.locked;
     const tracks=(animation?.tracks??[]).filter(track=>track.layerId===(id||undefined));summary.textContent=`${tracks.length} curves · ${tracks.reduce((count,track)=>count+track.keys.length,0)} keys on active layer`;
+    flatten.refresh();
   }
   const unsubscribe=store.subscribe(refresh);refresh();return {element,refresh,dispose:unsubscribe};
 }

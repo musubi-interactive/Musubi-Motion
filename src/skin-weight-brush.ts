@@ -29,12 +29,12 @@ const MAX_AFFECTED = 20_000;
 type Bucket = { column: number; row: number; chunks: Float64Array[]; used: number };
 
 /** Builds an immutable X-ray screen index; cancelled scans never return a partial index. */
-export async function createSkinBrushIndex(options: ComponentProjectionOptions & { projectedLimit?: number }): Promise<SkinBrushIndex> {
+export async function createSkinBrushIndex(options: ComponentProjectionOptions & { projectedLimit?: number; frontCenters?: boolean }): Promise<SkinBrushIndex> {
   const { componentCount, width, height } = options;
   const buckets = new Map<string, Bucket>();
   let visibleCount = 0;
   if (options.projectedLimit !== undefined && (!Number.isSafeInteger(options.projectedLimit) || options.projectedLimit < 1)) throw Error("Invalid projected brush index limit.");
-  await scanProjectedComponents(options, (index, x, y) => {
+  function insert(index: number, x: number, y: number) {
     if (visibleCount >= (options.projectedLimit ?? Infinity)) throw Error("Brush index exceeds its projected component budget. Use a smaller viewport region; nothing changed.");
     const column = Math.floor(x / CELL_SIZE), row = Math.floor(y / CELL_SIZE), key = `${column}/${row}`;
     let bucket = buckets.get(key);
@@ -45,7 +45,20 @@ export async function createSkinBrushIndex(options: ComponentProjectionOptions &
       bucket.chunks.push(data); bucket.used = 0;
     }
     data[bucket.used++] = index; data[bucket.used++] = x; data[bucket.used++] = y; visibleCount++;
-  });
+  }
+  if (options.frontCenters) {
+    const columns = Math.floor(width / 4) + 1, rows = Math.floor(height / 4) + 1;
+    if (columns * rows > 2_000_000) throw Error("Front-center brush exceeds 2,000,000 screen cells. Use Through or a smaller viewport.");
+    const nearest = new Map<number, { index: number; x: number; y: number; depth: number }>();
+    await scanProjectedComponents(options, (index, x, y, depth) => {
+      const cell = Math.floor(y / 4) * columns + Math.floor(x / 4), previous = nearest.get(cell);
+      if (!previous || depth < previous.depth || depth === previous.depth && index < previous.index) {
+        if (!previous && nearest.size >= (options.projectedLimit ?? Infinity)) throw Error("Front-center brush index exceeds its projected component budget.");
+        nearest.set(cell, { index, x, y, depth });
+      }
+    });
+    for (const point of nearest.values()) insert(point.index, point.x, point.y);
+  } else await scanProjectedComponents(options, insert);
   // Bounded typed chunks preserve IDs/precision without a final full-index copy or per-point objects.
   if (options.cancelled?.()) throw new DOMException("Brush indexing cancelled; no index was created.", "AbortError");
   return {

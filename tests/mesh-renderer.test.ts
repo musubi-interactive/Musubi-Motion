@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { Group, LineSegments, Mesh, MeshStandardMaterial, Points } from "three";
 import { captureMaterials } from "../src/mesh-materials.ts";
+import { prepareMeshBevel } from "../src/mesh-bevel.ts";
 import { createMeshComponentPreview } from "../src/mesh-component-preview.ts";
 import { createMeshRenderable } from "../src/mesh-renderer.ts";
-import { createMeshPrimitive, extrudeMeshFaces, findMeshShape, setMeshVertexPositions, updateMeshAppearance } from "../src/mesh-modeling.ts";
+import { createMeshPrimitive, extrudeMeshFaces, findMeshShape, meshEdges, setMeshVertexPositions, updateMeshAppearance } from "../src/mesh-modeling.ts";
 import { createSceneStore } from "../src/scene-store.ts";
 
 function fixture() {
@@ -44,6 +45,41 @@ describe("imported mesh material batches", () => {
 });
 
 describe("polygon mesh rendering", () => {
+  it("restores exact buffers after repeated replacement-topology previews and releases transient resources", () => {
+    const { shape, renderer } = fixture();
+    const { mesh, centers, triangleFaceIds } = renderer;
+    const edges = mesh.children[0] as LineSegments;
+    const source = mesh.geometry, sourceEdges = edges.geometry, baselineBounds = renderer.bounds.clone();
+    const prepared = prepareMeshBevel(shape, [meshEdges(shape)[0].id]);
+    const first = prepared.evaluate({ width: 0.25, segments: 1 }).shape;
+    const second = prepared.evaluate({ width: 0.4, segments: 3 }).shape;
+    renderer.previewTopology(first);
+    expect(mesh.geometry).not.toBe(source);
+    expect(renderer.triangleFaceIds.length).toBeGreaterThan(triangleFaceIds.length);
+    const disposeFirst = vi.spyOn(mesh.geometry, "dispose");
+    const disposeFirstEdges = vi.spyOn(edges.geometry, "dispose");
+    const invalid = { ...first, faces: [{ ...first.faces[0], vertices: ["missing", "other", "bad"] }] };
+    expect(() => renderer.previewTopology(invalid)).toThrow(/existing vertex/);
+    expect(disposeFirst).not.toHaveBeenCalled();
+    renderer.previewTopology(second);
+    expect(disposeFirst).toHaveBeenCalledTimes(1);
+    expect(disposeFirstEdges).toHaveBeenCalledTimes(1);
+    const disposeSecond = vi.spyOn(mesh.geometry, "dispose");
+    renderer.clearPreview();
+    expect(disposeSecond).toHaveBeenCalledTimes(1);
+    expect(mesh.geometry).toBe(source);
+    expect(edges.geometry).toBe(sourceEdges);
+    expect(renderer.centers).toBe(centers);
+    expect(renderer.triangleFaceIds).toBe(triangleFaceIds);
+    expect(renderer.bounds.equals(baselineBounds)).toBe(true);
+    renderer.previewTopology(first);
+    const disposeLast = vi.spyOn(mesh.geometry, "dispose");
+    const disposeSource = vi.spyOn(source, "dispose");
+    renderer.dispose();
+    expect(disposeLast).toHaveBeenCalledTimes(1);
+    expect(disposeSource).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps mesh, material and buffers stable through appearance-only commands", () => {
     const { store, shape, renderer } = fixture();
     const { mesh, bounds, centers, triangleFaceIds } = renderer;

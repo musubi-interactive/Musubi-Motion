@@ -1,5 +1,6 @@
 import { dyno, type SplatMesh } from "@sparkjsdev/spark";
 import { Box3, DataTexture, FloatType, Matrix4, Ray, RGBAFormat, Sphere, Vector3, type Raycaster } from "three";
+import type { SplatAppearanceRead } from "./splat-appearance-runtime.ts";
 import { componentTransformLookup, gaussianBounds, gaussianFactor, type SplatComponentTransforms } from "./splat-component-transforms.ts";
 
 /** One sparse RGBA32F row per edited original: four affine columns; c0.w
@@ -75,14 +76,14 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
       if (!bound) mesh.covObjectModifiers = [...(mesh.covObjectModifiers ?? []), modifier];
       mesh.updateGenerator();
     },
-    positions(indices: readonly number[]) {
+    positions(indices: readonly number[], appearance?: SplatAppearanceRead, includeTransparent = false) {
       const result = new Float32Array(indices.length * 3);
       const source = mesh.extSplats ?? mesh.packedSplats;
       indices.forEach((index, offset) => {
         const splat = source!.getSplat(index);
         const center = splat.center.clone(), affine = lookup(index);
         if (affine) center.applyMatrix4(affine);
-        result.set(splat.opacity * mesh.opacity < mesh.minRaycastOpacity ? [NaN, NaN, NaN] : center.toArray(), offset * 3);
+        result.set(!includeTransparent && (appearance?.opacity(index, splat.opacity) ?? splat.opacity) * mesh.opacity < mesh.minRaycastOpacity ? [NaN, NaN, NaN] : center.toArray(), offset * 3);
       });
       return result;
     },
@@ -94,14 +95,14 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
       });
       return result;
     },
-    pick(active: (index: number) => boolean, raycaster: Raycaster) {
+    pick(active: (index: number) => boolean, raycaster: Raycaster, appearance?: SplatAppearanceRead) {
       mesh.updateWorldMatrix(true, false);
       const ray = raycaster.ray.clone().applyMatrix4(mesh.matrixWorld.clone().invert());
       const sphere = new Sphere(new Vector3(), 1), hit = new Vector3();
       let nearest = Infinity;
       (mesh.extSplats ?? mesh.packedSplats)?.forEachSplat((index, center, scales, rotation, opacity) => {
-        if (!active(index) || opacity * mesh.opacity < mesh.minRaycastOpacity || Math.min(...scales.toArray()) <= 0) return;
-        const factor = gaussianFactor(center, scales.clone().multiplyScalar(2), rotation, lookup(index));
+        if (!active(index) || (appearance?.opacity(index, opacity) ?? opacity) * mesh.opacity < mesh.minRaycastOpacity || Math.min(scales.x, scales.y, scales.z) <= 0) return;
+        const factor = gaussianFactor(center, scales.clone().multiplyScalar(2 * (appearance?.scale(index) ?? 1)), rotation, lookup(index));
         if (Math.abs(factor.determinant()) < 1e-24) return;
         const local = new Ray().copy(ray).applyMatrix4(factor.clone().invert());
         if (!local.intersectSphere(sphere, hit)) return;

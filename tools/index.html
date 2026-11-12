@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tools · Musubi Motion</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        color: #202020;
+        background: #ececec;
+        font: 14px/1.45 "Inter", system-ui, sans-serif;
+        --panel: #fafafa;
+        --border: #d0d0d0;
+        --muted: #525252;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          color: #ececec;
+          background: #202020;
+          --panel: #282828;
+          --border: #494949;
+          --muted: #bcbcbc;
+        }
+      }
+      body { max-width: 580px; margin: 32px auto; padding: 0 16px; }
+      a { color: inherit; text-underline-offset: 3px; }
+      h1 { margin: 12px 0 16px; font-size: 24px; }
+      ul { margin: 0; padding: 0; list-style: none; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); }
+      li + li { border-top: 1px solid var(--border); }
+      li a { display: grid; gap: 4px; padding: 12px 14px; text-decoration: none; }
+      li a:hover strong { text-decoration: underline; }
+      span { color: var(--muted); }
+      :focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+    </style>
+  </head>
+  <body>
+    <header><a href="../">Back to editor</a></header>
+    <main>
+      <h1>Tools</h1>
+      <ul>
+        <li><a href="./splat-crop/"><strong>Splat Crop</strong><span>Crop a Gaussian PLY capture to a region.</span></a></li>
+        <li><a href="./uv-layout/"><strong>UV Layout</strong><span>Inspect OBJ UVs and download a texture-painting template.</span></a></li>
+        <li><a href="./particle-burst/"><strong>Particle Burst</strong><span>Bake a particle burst to an editable Gaussian PLY.</span></a></li>
+      </ul>
+    </main>
+  </body>
+</html>

@@ -20,6 +20,8 @@ export type SkinInfluence = { jointId: string; weight: number };
 export type SkinWeights = { count: number; overrides: Record<string, SkinInfluence[]> };
 export type SkinBinding = { meshSpace?: boolean; jointIds: string[]; restMatrices: number[][]; weights?: SkinWeights };
 export type SplatShapeNode = {
+  attributePaint?: import("./splat-attribute-paint.ts").SplatAttributePaint;
+  appearance?: import("./splat-appearance.ts").SplatAppearanceStack;
   selectionSets?: import("./splat-masks.ts").SplatSelectionSet[];
   scalarMasks?: import("./splat-masks.ts").SplatScalarMask[];
   componentTransforms?: import("./splat-component-transforms.ts").SplatComponentTransforms;

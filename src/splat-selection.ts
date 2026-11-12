@@ -1,9 +1,10 @@
 import * as THREE from "three";
+import type { SplatAppearanceRead } from "./splat-appearance-runtime.ts";
 import type { SplatMesh, SplatSkinning } from "@sparkjsdev/spark";
 
 // Spark's CPU raycast reads the undeformed asset. Build the same affine
 // transforms used by GPU skinning for picking, marquee selection and bounds.
-export function posedSelection(mesh:SplatMesh,skin:SplatSkinning,transforms:THREE.Matrix4[],active?:(index:number)=>boolean, affine?:(index:number)=>THREE.Matrix4|undefined) {
+export function posedSelection(mesh:SplatMesh,skin:SplatSkinning,transforms:THREE.Matrix4[],active?:(index:number)=>boolean, affine?:(index:number)=>THREE.Matrix4|undefined, appearance?:SplatAppearanceRead) {
   const source=mesh.extSplats!;
   const centers=new Float32Array(source.numSplats*3);
   const bounds=new THREE.Box3();
@@ -11,7 +12,7 @@ export function posedSelection(mesh:SplatMesh,skin:SplatSkinning,transforms:THRE
   for(let i=0;i<source.numSplats;i++) {
     if (active && !active(i)) { centers.fill(NaN,i*3,i*3+3); continue; }
     const s=source.getSplat(i);
-    if(s.opacity*(mesh.opacity??1)<mesh.minRaycastOpacity){centers.fill(NaN,i*3,i*3+3);continue;}
+    if((appearance?.opacity(i,s.opacity)??s.opacity)*(mesh.opacity??1)<mesh.minRaycastOpacity){centers.fill(NaN,i*3,i*3+3);continue;}
     const m=new THREE.Matrix4();m.elements.fill(0);
     for(let k=0;k<4;k++) {
       const packed=skin.skinData[i*4+k],w=(packed&255)/255,bone=transforms[packed>>8];
@@ -21,7 +22,7 @@ export function posedSelection(mesh:SplatMesh,skin:SplatSkinning,transforms:THRE
     const rest=affine?.(i);
     const center=s.center.clone();if(rest)center.applyMatrix4(rest);center.applyMatrix4(m);centers.set(center.toArray(),i*3);
     if(rest)m.multiply(rest);
-    m.multiply(new THREE.Matrix4().compose(s.center,s.quaternion,s.scales.clone().multiplyScalar(2)));
+    m.multiply(new THREE.Matrix4().compose(s.center,s.quaternion,s.scales.clone().multiplyScalar(2*(appearance?.scale(i)??1))));
     const e=m.elements;
     const extent=new THREE.Vector3(Math.hypot(e[0],e[4],e[8]),Math.hypot(e[1],e[5],e[9]),Math.hypot(e[2],e[6],e[10]));
     bounds.expandByPoint(center.clone().add(extent));bounds.expandByPoint(center.clone().sub(extent));
