@@ -7,13 +7,14 @@ import { compileGraph, type GraphProgram, type PixelSource } from "./procedural-
 import { createSplatPaintPanel } from "./splat-paint-panel.ts";
 import { createSplatAttributePaintTool, type SplatPaintContext } from "./splat-attribute-paint-tool.ts";
 import { createSplatAttributePaintRuntime, type SplatAttributePaintRuntime } from "./splat-attribute-paint-runtime.ts";
-import { ATTRIBUTE_PAINT_LIMITS, commitSplatAttributePaint, validateSplatAttributePaint, type SplatAttributePaint } from "./splat-attribute-paint.ts";
+import { ATTRIBUTE_PAINT_LIMITS, assertSplatPaintUndoFits, commitSplatAttributePaint, trimSplatPaintHistory, validateSplatAttributePaint, type SplatAttributePaint } from "./splat-attribute-paint.ts";
 import { createSplatMaskPanel } from "./splat-mask-panel.ts";
 import { createSplatMaskPaintTool } from "./splat-mask-paint-tool.ts";
-import { applySplatMaskStroke, validateSplatMaskCollections } from "./splat-masks.ts";
+import { applySplatMaskStroke, assertSplatMaskUndoFits, trimSplatMaskHistory, validateSplatMaskCollections } from "./splat-masks.ts";
 import { boundedAttributeValue } from "./custom-attributes.ts";
 import { createProceduralGraphPanel } from "./procedural-graph-panel.ts";
 import { createTextureAssetsPanel } from "./texture-assets-panel.ts";
+import { createMaterialPanel } from "./material-panel.ts";
 import { collectEmbeddedTextures, validateTextureDecoding, type TextureAsset } from "./texture-assets.ts";
 import { meshToSplatData } from "./mesh-to-splats";
 import { createMeshSplatColors } from "./mesh-splat-colors";
@@ -43,6 +44,7 @@ import {
 } from "./scene-store.ts";
 import { mountViewportFileDrop } from "./viewport-file-drop.ts";
 import { importFBX } from "./fbx-import.ts";
+import { createMotionImportPanel } from "./motion-import-panel.ts";
 import { transformSpace, type TransformOrientation } from "./transform-space.ts";
 import { objectGeometryPosition, relocateObjectPivot, objectLocalMatrix, globalObjectTransform } from "./object-pivot.ts";
 import type { TransformNode } from "./scene-document.ts";
@@ -52,7 +54,9 @@ import { makeDemo, prepareSplat } from "./splat-assets.ts";
 import {
   encodeProjectBlob,
   decodeProjectBlob,
+  validateScene,
 } from "./project-archive.ts";
+import { addSplatExtraction, assertSplatExtractionBudget, createExtractedSplatMesh, encodeSplatExtraction, isSplatExtractionFile, splatExtractionFileSize, splatExtractionSource, SPLAT_EXTRACTION_LABEL, SPLAT_EXTRACTION_NAME } from "./splat-extraction.ts";
 import type { EditorSnapshot } from "./project-archive.ts";
 import { pickScene, saveDestination, writeScene } from "./scene-files.ts";
 import type { SceneFileHandle } from "./scene-files.ts";
@@ -104,7 +108,7 @@ import { createBinding } from "./splat-binding.ts";
 import { validateSkinWeightCount, editSkinWeightValues } from "./skin-weights.ts";
 import { createSkinWeightsPanel } from "./skin-weights-panel.ts";
 import { createSkinWeightPreview } from "./skin-weight-preview.ts";
-import { captureSplatComponentTransform, trimSplatTransformHistory, validateSplatComponentTransforms, withSplatComponentTransforms, type SplatComponentTransforms } from "./splat-component-transforms.ts";
+import { assertSplatTransformUndoFits, captureSplatComponentTransform, trimSplatTransformHistory, validateSplatComponentTransforms, withSplatComponentTransforms, type SplatComponentTransforms } from "./splat-component-transforms.ts";
 import { createSplatTransformRuntime, type SplatTransformRuntime } from "./splat-transform-runtime.ts";
 import { combineWeightedSplatSelection, defaultSplatSoftSettings, hardSplatSelection, selectSplatRadial, selectSplatSphere, splatSelectionWeight, splatSoftCoreFraction, validateSplatSoftSettings, validateWeightedSplatSelection, type SplatSoftSettings, type WeightedSplatSelection } from "./splat-soft-selection.ts";
 import { createSplatSoftPreview } from "./splat-soft-selection-preview.ts";
@@ -329,6 +333,8 @@ async function start() {
   let paintSettings: SkinWeightBrushSettings | undefined;
   let modelingPanel: ReturnType<typeof createModelingPanel> | undefined;
   let texturePanel: ReturnType<typeof createTextureAssetsPanel> | undefined;
+  let materialPanel: ReturnType<typeof createMaterialPanel> | undefined;
+  let motionImportPanel: ReturnType<typeof createMotionImportPanel> | undefined;
   let graphPanel: ReturnType<typeof createProceduralGraphPanel> | undefined;
   let appearancePanel: ReturnType<typeof createSplatAppearancePanel> | undefined;
   const noAppearanceMasks: NonNullable<SplatShapeNode["scalarMasks"]> = [];
@@ -391,6 +397,7 @@ async function start() {
   let splatBrushResizeHeld = false, previewSplatRadius: number | undefined;
   const splatGestureOverlay = createSplatGestureOverlay(viewport);
   let splatPanel: ReturnType<typeof createSplatComponentPanel> | undefined;
+  let extractionRequest: { controller: AbortController; document: SceneDocument } | undefined;
   const splatPreview = createSplatComponentPreview();
   let splatPreviewPose = -1, splatPreviewIds: Uint32Array | undefined;
   let skinPoseVersion = 0;
@@ -709,21 +716,116 @@ async function start() {
       notice.textContent = `${SPLAT_EDIT_LABELS[action]} applied to ${context.shape.name}.`;
     } catch (error) { notice.textContent = (error as Error).message; }
   }
+  function cancelSplatExtraction(message = "Splat duplication canceled.") {
+    const request = extractionRequest;
+    if (!request || request.controller.signal.aborted) return;
+    request.controller.abort(new DOMException(message, "AbortError"));
+  }
+  async function duplicateSelectedSplats() {
+    const context = splatContext(), identity = splatComponent, indices = splatComponentIds;
+    if (!context || !identity || !indices.length || loading || playing || dragId || gesture ||
+        pendingComponentPick !== undefined || splatTransformPreview || splatPaintTool?.active || splatMaskPaintTool?.busy || extractionRequest) return;
+    const before = store.getState().document;
+    const request = { controller: new AbortController(), document: before };
+    const { signal } = request.controller;
+    let mesh: SplatMesh | undefined, object: Extract<RuntimeObject, { kind: "splat" }> | undefined;
+    let skin: ReturnType<typeof createBinding> | undefined;
+    let committed = false;
+    try {
+      const { owner } = splatExtractionSource(before, identity, indices);
+      const source = context.object.mesh.extSplats;
+      if (!source) throw Error("Duplicate requires loaded original extended splats.");
+      collectUnusedResources();
+      const size = splatExtractionFileSize(source, identity, indices.length);
+      const retained = [...assetFiles.values()];
+      const countedAssets = new Set<string>();
+      for (const candidate of runtime.values()) if (candidate.kind === "splat") {
+        const file = assetFiles.get(candidate.assetId);
+        if (!file || !isSplatExtractionFile(file.name)) continue;
+        if (countedAssets.has(candidate.assetId)) retained.push(file);
+        countedAssets.add(candidate.assetId);
+      }
+      assertSplatExtractionBudget(retained, size);
+      extractionRequest = request;
+      refreshSplatPanel();
+      const bytes = await encodeSplatExtraction(source, identity, indices, signal);
+      function checkCurrent() {
+        signal.throwIfAborted();
+        if (store.getState().document !== before || splatComponent !== identity || splatComponentIds !== indices ||
+            loading || playing || dragId || gesture || pendingComponentPick !== undefined ||
+            splatTransformPreview || splatPaintTool?.active || splatMaskPaintTool?.busy)
+          throw Error("The scene or selection changed during duplication. Select the splats and try again.");
+      }
+      checkCurrent();
+      const result = addSplatExtraction(before, identity, indices, bytes.byteLength);
+      validateScene(result.document);
+      assertSplatTransformUndoFits(before, result.shape.componentTransforms);
+      assertSplatMaskUndoFits(before, result.document);
+      assertSplatPaintUndoFits(before, result.document);
+      mesh = createExtractedSplatMesh(bytes);
+      const data = await prepareSplat(mesh);
+      checkCurrent();
+      const root = new THREE.Group(), preview = new THREE.Group();
+      const box = new THREE.Box3Helper(new THREE.Box3(), 0x999999);
+      box.visible = false;
+      preview.add(mesh);
+      root.add(preview);
+      const transforms = createSplatTransformRuntime(mesh);
+      object = { kind: "splat", root, preview, box, mesh, ...data, assetId: result.assetId, transforms };
+      transforms.update(result.shape.componentTransforms);
+      transforms.setBound(!!result.shape.binding);
+      if (result.shape.binding) skin = createBinding(mesh, result.shape.binding, undefined, before.joints, transforms);
+      else if (result.shape.componentTransforms) object.transformedBounds = transforms.bounds(index => index < data.count);
+      const file = new File([bytes], SPLAT_EXTRACTION_NAME);
+      checkCurrent();
+
+      const drafts = new Map(poseOverrides), draft = drafts.get(owner.id);
+      if (draft) drafts.set(result.id, draft);
+      poseDrafts.capture(before, poseOverrides);
+      poseDrafts.capture(result.document, drafts);
+      runtime.set(result.id, object);
+      if (skin) bindings.set(result.shape.id, { binding: result.shape.binding, elasticity: undefined, structure: jointStructure, mesh, skin });
+      assetFiles.set(result.assetId, file);
+      world.add(box);
+      extractionRequest = undefined;
+      committed = true;
+      store.setState({ document: result.document, editLabel: SPLAT_EXTRACTION_LABEL });
+      trimSplatTransformHistory(store);
+      trimSplatMaskHistory(store);
+      trimSplatPaintHistory(store);
+      selectObjects([result.id]);
+      notice.textContent = `Duplicated ${indices.length.toLocaleString()} selected splats into a new object.`;
+    } catch (error) {
+      notice.textContent = (error as Error).message;
+    } finally {
+      if (!committed) {
+        skin?.dispose();
+        if (object) disposeObject(object);
+        else mesh?.dispose();
+      }
+      if (extractionRequest === request) extractionRequest = undefined;
+      refreshSplatPanel();
+    }
+  }
   function refreshSplatPanel() {
     const context = splatContext();
-    const available = !loading && !playing && !dragId, busy = pendingComponentPick !== undefined;
+    const duplicating = extractionRequest !== undefined;
+    const available = !loading && !playing && !dragId && !duplicating, busy = pendingComponentPick !== undefined;
     splatSoftPanel?.update(splatSoftSettings, !!context && available, busy, splatSelectionTool, splatComponentIds.length);
     const activeGesture = busy && gesture?.splat;
-    const activity = activeGesture ? (gesture?.splatPath?.tool === "resize" ? "Resizing brush…" : gesture?.splatPath?.tool === "paint" ? "Painting…" : "Drawing…")
+    const activity = duplicating ? "Duplicating…" : activeGesture ? (gesture?.splatPath?.tool === "resize" ? "Resizing brush…" : gesture?.splatPath?.tool === "paint" ? "Painting…" : "Drawing…")
       : busy ? "Scanning…" : undefined;
     for (const action of ["all", "none", "invert"]) element<WaDropdownItem>(`select-splats-${action}`).disabled = !context || !available || busy;
     for (const action of ["hide", "show", "delete", "restore"] as const) {
       const count = action === "show" ? context?.hidden : action === "restore" ? context?.deleted : splatComponentIds.length;
       element<WaDropdownItem>(`edit-splats-${action}`).disabled = !context || !available || busy || !count;
     }
+    const canDuplicate = !!context && available && !busy && !splatPaintTool?.active &&
+      !splatMaskPaintTool?.busy && !splatTransformPreview && !!splatComponentIds.length;
+    element<WaDropdownItem>("edit-splats-duplicate").disabled = !canDuplicate;
     splatPanel?.update(context?.shape.name, splatComponentIds.length, context?.activeCount ?? 0, activity, available,
       splatSelectionTool, previewSplatRadius === undefined ? splatBrush : { ...splatBrush, radius: previewSplatRadius },
-      { hidden: context?.hidden ?? 0, deleted: context?.deleted ?? 0 });
+      { hidden: context?.hidden ?? 0, deleted: context?.deleted ?? 0 }, canDuplicate, duplicating);
   }
   function changeSplatTool(tool: SplatSelectionTool) {
     if (splatSelectionTool === tool) return;
@@ -757,6 +859,7 @@ async function start() {
     showSplatRegion(); refreshSplatPanel();
   }
   function exitSplatComponents() {
+    cancelSplatExtraction();
     splatPaintPanel?.stopPainting();
     if (!splatComponent) return;
     splatMaskPanel?.stopPainting();
@@ -1453,6 +1556,8 @@ async function start() {
     modelingPanel?.refresh();
     particlePanel?.refresh();
     appearancePanel?.refresh();
+    materialPanel?.refresh();
+    motionImportPanel?.refresh();
   }
   function syncScene() {
     const doc = store.getState().document;
@@ -1698,6 +1803,18 @@ async function start() {
     onStatus: message => { notice.textContent = message; },
   });
   workspace.registerPanel("animation-layers", "Animation Layers", animationLayersPanel.element);
+  motionImportPanel = createMotionImportPanel(store, {
+    available: () => !loading && !dragId && !playing,
+    selectedJoint: () => skeleton.selectedIds.values().next().value,
+    onImport(stage) {
+      const mode = document.querySelector<HTMLSelectElement>("select[aria-label='Playback mode']")!;
+      if (mode.value !== "animation") { mode.value = "animation"; mode.dispatchEvent(new Event("change")); }
+      selectAnimationTarget(stage.rootId);
+      setFrame(stage.start);
+      terminal.log(`${stage.name}: frames ${stage.start}–${stage.end} · ${stage.jointIds.length} joints`);
+    },
+  });
+  workspace.registerPanel("motion-import", "Motion Import", motionImportPanel.element);
   jointMirrorPanel = createJointMirrorPanel(store, {
     available: () => !loading && !dragId && !playing,
     getSelection: allSelection, getFKPoses: () => fkPoses, getFrame,
@@ -1777,6 +1894,7 @@ async function start() {
   }
   element("animation-set-key").addEventListener("click", keySelection);
   store.subscribe((state, previous) => {
+    if (extractionRequest && extractionRequest.document !== state.document) cancelSplatExtraction("The scene changed during splat duplication.");
     customPreviews.clear();
     const attributeDraft = customDrafts.get(state.document);
     if (attributeDraft?.epoch === customDraftEpoch) for (const [id, values] of attributeDraft.values) customPreviews.set(id, { ...values });
@@ -1879,7 +1997,9 @@ async function start() {
   workspace.registerPanel("modeling", "Mesh Tools", modelingPanel.element);
   splatPanel = createSplatComponentPanel({ enter: enterSplatComponents, exit: exitSplatComponents, select: action => void selectSplatComponents(action),
     depth: value => { cancelComponentScan(); cancelSelection(); splatSelectionDepth = value; updateSplatPreview(); },
-    cancel: () => { cancelComponentScan(); cancelSelection(); }, tool: tool => { splatMaskPanel?.stopPainting(); changeSplatTool(tool); }, brush: changeSplatBrush, edit: applySplatComponentEdit, previewTransform: numericSplatPreview, transform: numericSplatCommit });
+    cancel: () => { if (extractionRequest) cancelSplatExtraction(); else { cancelComponentScan(); cancelSelection(); } },
+    tool: tool => { splatMaskPanel?.stopPainting(); changeSplatTool(tool); }, brush: changeSplatBrush, edit: applySplatComponentEdit,
+    duplicate: () => void duplicateSelectedSplats(), previewTransform: numericSplatPreview, transform: numericSplatCommit });
   splatSoftPanel = createSplatSoftPanel({
     change: changeSplatSoftSettings, preview: previewSplatSoftField,
     previewCurve: () => {
@@ -1943,6 +2063,22 @@ async function start() {
   workspace.registerPanel("particles", "Particle Emitters", particlePanel.element);
   texturePanel = createTextureAssetsPanel(store, { available: () => !loading && !dragId && !playing, onStatus: message => { notice.textContent = message; } });
   workspace.registerPanel("texture-assets", "Texture Assets", texturePanel.element);
+  materialPanel = createMaterialPanel(store, {
+    selectedMesh() {
+      if (selected.size !== 1 || skeleton.selectedIds.size || selectedIKId || selectedIKBlendId) return;
+      const object = runtime.get(selected.values().next().value!);
+      const shape = object?.kind === "mesh" && store.getState().document.nodes[object.shape.id];
+      return shape && shape.type === "meshShape" ? shape : undefined;
+    },
+    available: () => !loading && !dragId && !playing,
+    openAssets: () => element("view-texture-assets").click(),
+    preview(target, field) {
+      const shape = store.getState().document.nodes[target.shapeId];
+      const object = shape?.type === "meshShape" ? runtime.get(shape.parentId) : undefined;
+      return object?.kind === "mesh" ? object.polygon.previewTexture(target.index, target.slot, field) : undefined;
+    },
+  });
+  workspace.registerPanel("materials", "Materials", materialPanel.element);
   graphPanel = createProceduralGraphPanel(store, {
     onDraft: queueSplatAppearance,
     available: () => !loading && !dragId && !playing,
@@ -1981,6 +2117,7 @@ async function start() {
     const id = (event as WaSelectEvent).detail.item.id;
     if (id === "undo" || id === "redo") historyAction(id === "redo");
     else if (id === "edit-splats-delete" || id === "edit-splats-restore") applySplatComponentEdit(id === "edit-splats-delete" ? "delete" : "restore");
+    else if (id === "edit-splats-duplicate") void duplicateSelectedSplats();
   });
   element("display-menu").addEventListener("wa-select", (event) => {
     const id = (event as WaSelectEvent).detail.item.id;
@@ -2648,6 +2785,11 @@ async function start() {
   });
   // A long scan must remain cancellable even if focus moves into an editor field.
   window.addEventListener("keydown", event => {
+    if (event.key === "Escape" && extractionRequest) {
+      event.preventDefault();
+      cancelSplatExtraction();
+      return;
+    }
     if (event.key !== "Escape" || pendingComponentPick === undefined) return;
     cancelComponentScan(); cancelSelection(); skinWeightsPanel?.stopPicking();
   }, true);
@@ -2770,6 +2912,8 @@ async function start() {
     playing = value;
     graphPanel?.refresh();
     appearancePanel?.refresh();
+    materialPanel?.refresh();
+    motionImportPanel?.refresh();
     updateSplatPreview();
     buttonContent(play, value ? "pause" : "play");
     const label = value ? "Pause animation" : "Play animation";
@@ -3037,6 +3181,8 @@ async function start() {
         const mesh =
           asset.kind === "procedural"
             ? makeDemo()
+            : isSplatExtractionFile(asset.fileName)
+            ? createExtractedSplatMesh(await project.files.get(asset.id)!.arrayBuffer())
             : new SplatMesh({
                 extSplats: true,
                 covSplats: true,

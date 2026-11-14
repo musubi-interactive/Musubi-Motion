@@ -1,4 +1,4 @@
-import { AnimationMixer, Bone, Euler, Group, LoadingManager, LoopOnce, MathUtils, Matrix3, Matrix4, Mesh, Quaternion, SkinnedMesh, Texture, TextureLoader, Vector3 } from "three";
+import { AnimationMixer, Bone, Euler, Group, LoadingManager, LoopOnce, MathUtils, Matrix3, Matrix4, Mesh, Quaternion, SkinnedMesh, Texture, TextureLoader, Vector3, type AnimationClip } from "three";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import { defaultAnimation, type AnimationChannel, type AnimationTrack } from "./animation.ts";
 import { unwrapEuler } from "./animation-edit.ts";
@@ -6,7 +6,7 @@ import { validateScene } from "./project-archive.ts";
 import { validateMeshShape } from "./mesh-modeling.ts";
 import { uniqueName, type MeshShapeNode, type SceneDocument, type TransformChannels, type Vec3 } from "./scene-document.ts";
 import type { Joint } from "./skeleton.ts";
-import { captureMaterials, MESH_TEXTURE_SLOTS } from "./mesh-materials.ts";
+import { captureMaterials, disposeMaterials, MESH_TEXTURE_SLOTS } from "./mesh-materials.ts";
 import type { MeshSkin } from "./mesh-skin.ts";
 
 const id = () => crypto.randomUUID();
@@ -80,13 +80,17 @@ function separateMeshFans(shape: MeshShapeNode): boolean {
 }
 
 /** Error-bounded reduction: every sampled value remains within tolerance. */
-function reducedSamples(times: number[], values: number[], steps: Set<number>, tolerance: number): number[] {
+function reducedSamples(times: number[], values: number[], steps: Set<number>, tolerance: number, budget?: { remaining: number }): number[] {
   const keep = new Set([0, times.length - 1]);
   for (const i of steps) { keep.add(i); if (i + 1 < times.length) keep.add(i + 1); }
   const boundaries = [...keep].sort((a, b) => a - b), pending: [number, number][] = [];
   for (let i = 1; i < boundaries.length; i++) pending.push([boundaries[i - 1], boundaries[i]]);
   while (pending.length) {
     const [a, b] = pending.pop()!; let worst = tolerance, chosen = -1;
+    if (budget) {
+      budget.remaining -= b - a - 1;
+      if (budget.remaining < 0) throw Error("The take is too complex to reduce. Export a shorter range or lower the scene FPS.");
+    }
     for (let i = a + 1; i < b; i++) {
       const linear = values[a] + (values[b] - values[a]) * (times[i] - times[a]) / (times[b] - times[a]);
       const error = Math.abs(values[i] - linear);
@@ -97,30 +101,41 @@ function reducedSamples(times: number[], values: number[], steps: Set<number>, t
   return [...keep].sort((a, b) => a - b);
 }
 
-/** Convert a parsed FBX atomically; callers commit only after full validation. */
-export function convertFBX(source: Group, doc: SceneDocument, name: string) {
+function readBoneRest(source: Group) {
   source.updateMatrixWorld(true);
-  const bones: Bone[] = [], meshes: Mesh[] = [], warnings = new Set<string>();
-  source.traverse(object => {
-    if ((object as Bone).isBone) bones.push(object as Bone);
-    if ((object as Mesh).isMesh) meshes.push(object as Mesh);
-
-  });
-  if (!bones.length && !meshes.length) throw Error("This FBX contains no meshes or skeleton joints.");
-  if (bones.length + (doc.joints?.length ?? 0) > 1000) throw Error("The scene supports at most 1,000 joints.");
-  const boneIds = new Map(bones.map(b => [b, id()]));
+  const bones: Bone[] = [];
+  source.traverse(object => { if ((object as Bone).isBone) bones.push(object as Bone); });
+  const boneSet = new Set(bones);
   const boneParents = new Map(bones.map(b => {
     let parent = b.parent;
-    while (parent && !boneIds.has(parent as Bone)) parent = parent.parent;
+    while (parent && !boneSet.has(parent as Bone)) parent = parent.parent;
     return [b, parent as Bone | null] as const;
   }));
   const restRigid = new Map(bones.map(b => [b, rigid(b)]));
-  const restScale = new Map(bones.map(b => [b, new Vector3().setFromMatrixScale(b.matrixWorld)]));
-  const jointNames = new Set(doc.joints?.map(j => j.name));
-  const joints: Joint[] = bones.map(bone => {
+  const rows = bones.map(bone => {
     const parent = boneParents.get(bone), matrix = restRigid.get(bone)!.clone();
     if (parent) matrix.premultiply(restRigid.get(parent)!.clone().invert());
-    const pose = channels(matrix, bone.name);
+    return { bone, parent: parent ?? null, pose: channels(matrix, bone.name) };
+  });
+  return { bones, boneParents, restRigid, rows };
+}
+
+export function inspectFBXRestSkeleton(source: Group) {
+  return readBoneRest(source).rows;
+}
+
+type SkeletalTake = { clip: AnimationClip; rotationForBone?(bone: Bone, rotation: Vec3): Vec3 };
+
+function* convertFBXWork(source: Group, doc: SceneDocument, name: string, take?: SkeletalTake) {
+  const { bones, boneParents, restRigid, rows } = readBoneRest(source);
+  const meshes: Mesh[] = [], warnings = new Set<string>();
+  if (!take) source.traverse(object => { if ((object as Mesh).isMesh) meshes.push(object as Mesh); });
+  if (!bones.length && !meshes.length) throw Error("This FBX contains no meshes or skeleton joints.");
+  if (bones.length + (doc.joints?.length ?? 0) > 1000) throw Error("The scene supports at most 1,000 joints.");
+  const boneIds = new Map(bones.map(b => [b, id()]));
+  const restScale = new Map(bones.map(b => [b, new Vector3().setFromMatrixScale(b.matrixWorld)]));
+  const jointNames = new Set(doc.joints?.map(j => j.name));
+  const joints: Joint[] = rows.map(({ bone, parent, pose }) => {
     const base = bone.name || "joint"; let jointName = base, suffix = 2;
     while (jointNames.has(jointName)) jointName = `${base}_${suffix++}`;
     jointNames.add(jointName);
@@ -240,8 +255,9 @@ export function convertFBX(source: Group, doc: SceneDocument, name: string) {
   const raw = new Map<string, { targetId: string; channel: AnimationChannel; times: number[]; values: number[]; steps: Set<number> }>();
   let sampleValues = 0;
   const mixer = new AnimationMixer(source);
+  const sampleBatch = Math.max(1, Math.floor(15000 / Math.max(1, bones.length * 6)));
   try {
-    for (const clip of source.animations) {
+    for (const clip of take ? [take.clip] : source.animations) {
       if (!clip.tracks.length) continue;
       if (!Number.isFinite(clip.duration) || clip.duration < 0) throw Error("FBX contains an invalid animation duration.");
       const frames = Math.ceil(clip.duration * fps);
@@ -250,6 +266,7 @@ export function convertFBX(source: Group, doc: SceneDocument, name: string) {
       const action = mixer.clipAction(clip); action.setLoop(LoopOnce, 1); action.clampWhenFinished = true; action.play();
       const previous = new Map<string, Vec3>();
       for (let frame = 0; frame <= frames; frame++) {
+        if (take && frame % sampleBatch === 0) yield;
         mixer.setTime(Math.min(frame / fps, clip.duration)); source.updateMatrixWorld(true);
         const worlds = new Map(bones.map(b => {
           const scale = new Vector3().setFromMatrixScale(b.matrixWorld);
@@ -268,6 +285,7 @@ export function convertFBX(source: Group, doc: SceneDocument, name: string) {
           const parent = target.joint ? boneParents.get(target.object as Bone) : undefined;
           if (parent) matrix.premultiply(worlds.get(parent)!.clone().invert());
           const pose = channels(matrix, target.object.name);
+          if (target.joint && take?.rotationForBone) pose.rotation = take.rotationForBone(target.object as Bone, pose.rotation);
           if (previous.has(target.id)) pose.rotation = unwrapEuler(pose.rotation, previous.get(target.id)!);
           previous.set(target.id, pose.rotation);
           for (const kind of target.joint ? ["position", "rotation"] as const : ["position", "rotation", "scale"] as const) {
@@ -285,11 +303,14 @@ export function convertFBX(source: Group, doc: SceneDocument, name: string) {
       start += frames + 1;
       action.stop(); mixer.stopAllAction(); source.updateMatrixWorld(true);
     }
-  } finally { mixer.stopAllAction(); mixer.uncacheRoot(source); }
+  } finally { mixer.stopAllAction(); mixer.uncacheRoot(source); source.updateMatrixWorld(true); }
+  const reductionBudget = take ? { remaining: 16_000_000 } : undefined;
+  let reduced = 0;
   for (const row of raw.values()) {
+    if (take && reduced++ % 24 === 0) yield;
     const keys: AnimationTrack["keys"] = [];
     const tolerance = row.channel.startsWith("rotation.") ? .05 : .0001;
-    for (const i of reducedSamples(row.times, row.values, row.steps, tolerance)) {
+    for (const i of reducedSamples(row.times, row.values, row.steps, tolerance, reductionBudget)) {
       keys.push({ id: id(), time: row.times[i], value: row.values[i], interpolation: row.steps.has(i) ? "step" : "linear", tangentMode: "auto" });
     }
     tracks.push({ id: id(), targetId: row.targetId, channel: row.channel, keys });
@@ -298,6 +319,60 @@ export function convertFBX(source: Group, doc: SceneDocument, name: string) {
     end: Math.max(animation.tracks.length ? animation.end : 1, start - 1), tracks: [...animation.tracks, ...tracks] } };
   validateScene(next);
   return { document: next, objectIds: [...meshIds.values()], jointIds: [...boneIds.values()], warnings: [...warnings], clips: clipRanges };
+}
+
+/** Convert a parsed FBX atomically; callers commit only after full validation. */
+export function convertFBX(source: Group, doc: SceneDocument, name: string, take?: SkeletalTake) {
+  const work = convertFBXWork(source, doc, name, take);
+  let step = work.next();
+  while (!step.done) step = work.next();
+  return step.value;
+}
+
+/** Sample a single take in batches while the editor can process cancel and new input. */
+export async function convertFBXTake(source: Group, doc: SceneDocument, name: string, take: SkeletalTake, signal: AbortSignal) {
+  signal.throwIfAborted();
+  const work = convertFBXWork(source, doc, name, take);
+  let step = work.next();
+  try {
+    while (!step.done) {
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      signal.throwIfAborted();
+      step = work.next();
+    }
+    return step.value;
+  } finally {
+    if (!step.done) work.return(undefined as never);
+  }
+}
+
+/** Read a local animation-only FBX without loading referenced images. */
+export async function readFBXMotion(file: File): Promise<Group> {
+  if (!/\.fbx$/i.test(file.name)) throw Error("Choose an FBX motion file.");
+  if (!file.size || file.size > 32 * 1024 * 1024) throw Error("Motion FBX files must be between 1 byte and 32 MiB.");
+  const manager = new LoadingManager(), textures: Texture[] = [], meshes: Mesh[] = [];
+  class IgnoreTextures extends TextureLoader {
+    override load(url: string) {
+      if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+      const texture = new Texture();
+      textures.push(texture);
+      return texture;
+    }
+  }
+  manager.addHandler(/.*/, new IgnoreTextures(manager));
+  try {
+    const source = new FBXLoader(manager).parse(await file.arrayBuffer(), "");
+    source.traverse(object => { if ((object as Mesh).isMesh) meshes.push(object as Mesh); });
+    if (meshes.length) throw Error("Choose the Mixamo animation FBX downloaded Without Skin.");
+    return source;
+  } finally {
+    for (const mesh of meshes) {
+      mesh.geometry.dispose();
+      disposeMaterials(mesh.material);
+      if ((mesh as SkinnedMesh).isSkinnedMesh) (mesh as SkinnedMesh).skeleton.dispose();
+    }
+    textures.forEach(texture => texture.dispose());
+  }
 }
 
 /** FBX is parsed locally. Unsupported texture references never trigger network requests. */

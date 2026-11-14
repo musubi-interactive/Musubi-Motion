@@ -1,0 +1,65 @@
+; FBX 7.4.0 project file
+; Original Musubi material study: two triangles, two slots, a diagonal UV seam.
+FBXHeaderExtension:  {
+	FBXHeaderVersion: 1003
+	FBXVersion: 7400
+}
+Objects:  {
+	Geometry: 1, "Geometry::MaterialSeams", "Mesh" {
+		Vertices: *12 {
+			a: -1.5,-1.5,0,1.5,-1.5,0,1.5,1.5,0,-1.5,1.5,0
+		}
+		PolygonVertexIndex: *6 {
+			a: 0,1,-3,0,2,-4
+		}
+		LayerElementUV: 0 {
+			Version: 101
+			Name: "UVChannel_1"
+			MappingInformationType: "ByPolygonVertex"
+			ReferenceInformationType: "IndexToDirect"
+			UV: *12 {
+				a: 0,0,1,0,1,1,1,0,0,1,1,1
+			}
+			UVIndex: *6 {
+				a: 0,1,2,3,4,5
+			}
+		}
+		LayerElementMaterial: 0 {
+			Version: 101
+			Name: ""
+			MappingInformationType: "ByPolygon"
+			ReferenceInformationType: "IndexToDirect"
+			Materials: *2 {
+				a: 0,1
+			}
+		}
+	}
+	Model: 2, "Model::MaterialSeams", "Mesh" {
+		Version: 232
+		Properties70:  {
+			P: "Lcl Translation", "Lcl Translation", "", "A",0,0,0
+			P: "Lcl Rotation", "Lcl Rotation", "", "A",0,0,0
+			P: "Lcl Scaling", "Lcl Scaling", "", "A",1,1,1
+		}
+	}
+	Material: 3, "Material::Shell", "" {
+		Version: 102
+		ShadingModel: "phong"
+		Properties70:  {
+			P: "DiffuseColor", "Color", "", "A",1,1,1
+		}
+	}
+	Material: 4, "Material::Lining", "" {
+		Version: 102
+		ShadingModel: "phong"
+		Properties70:  {
+			P: "DiffuseColor", "Color", "", "A",0.8,0.8,0.8
+		}
+	}
+}
+Connections:  {
+	C: "OO",1,2
+	C: "OO",2,0
+	C: "OO",3,2
+	C: "OO",4,2
+}

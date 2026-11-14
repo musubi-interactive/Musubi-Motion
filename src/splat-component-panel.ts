@@ -1,6 +1,7 @@
 import type { SplatSelectionDepth, SplatSelectionOperation } from "./splat-component-selection.ts";
 
 import { SPLAT_EDIT_LABELS, type SplatEditAction } from "./splat-component-edits.ts";
+import { SPLAT_EXTRACTION_LABEL } from "./splat-extraction.ts";
 
 import { propertyInteraction } from "./property-interaction.ts";
 
@@ -10,7 +11,7 @@ import { MAX_SPLAT_BRUSH_RADIUS, type SplatBrushSettings, type SplatSelectionToo
 
 export function createSplatComponentPanel(actions: { enter: () => void; exit: () => void; select: (action: "all" | "none" | "invert") => void; depth: (value: SplatSelectionDepth) => void; cancel: () => void;
 
-  tool: (tool: SplatSelectionTool) => void; brush: (change: Partial<SplatBrushSettings>) => void; edit: (action: SplatEditAction) => void;
+  tool: (tool: SplatSelectionTool) => void; brush: (change: Partial<SplatBrushSettings>) => void; edit: (action: SplatEditAction) => void; duplicate: () => void;
 
   transform: (mode: "translate" | "rotate" | "scale", axis: number, value: number) => void;
 
@@ -37,6 +38,7 @@ export function createSplatComponentPanel(actions: { enter: () => void; exit: ()
     <button type="button" data-edit="delete" title="Delete selected splats (Delete)">${SPLAT_EDIT_LABELS.delete}</button>
 
     <button type="button" data-edit="restore" title="Restore all deleted splats in this object">${SPLAT_EDIT_LABELS.restore}</button>
+    <button type="button" data-duplicate title="Create an independent object from the selected original splats">${SPLAT_EXTRACTION_LABEL}</button>
 
   </div>`;
 
@@ -75,6 +77,8 @@ export function createSplatComponentPanel(actions: { enter: () => void; exit: ()
   const editButtons = Array.from(edits.querySelectorAll<HTMLButtonElement>("[data-edit]"));
 
   for (const button of editButtons) button.addEventListener("click", () => actions.edit(button.dataset.edit as SplatEditAction));
+  const duplicate = edits.querySelector<HTMLButtonElement>("[data-duplicate]")!;
+  duplicate.addEventListener("click", actions.duplicate);
 
   const depth = element.querySelector<HTMLSelectElement>('[aria-label="Splat selection depth"]')!;
 
@@ -248,7 +252,8 @@ export function createSplatComponentPanel(actions: { enter: () => void; exit: ()
 
   return { element, radiusLocked: () => radius.readOnly, update(name: string | undefined, count: number, total: number, activity: string | undefined, available: boolean,
 
-    activeTool: SplatSelectionTool, brush: SplatBrushSettings, removed: { hidden: number; deleted: number }) {
+    activeTool: SplatSelectionTool, brush: SplatBrushSettings, removed: { hidden: number; deleted: number },
+    canDuplicate: boolean, duplicating: boolean) {
 
     const busy = activity !== undefined;
 
@@ -267,6 +272,7 @@ export function createSplatComponentPanel(actions: { enter: () => void; exit: ()
     for (const button of editButtons) button.disabled = !name || busy || !available ||
 
       !(button.dataset.edit === "show" ? removed.hidden : button.dataset.edit === "restore" ? removed.deleted : count);
+    duplicate.disabled = !canDuplicate;
 
     element.querySelector<HTMLButtonElement>("[data-enter]")!.disabled = !!name || !available;
 
@@ -276,7 +282,7 @@ export function createSplatComponentPanel(actions: { enter: () => void; exit: ()
 
     cancel.disabled = !busy;
 
-    const cancelLabel = busy && activity !== "Scanning…" ? "Cancel gesture" : "Cancel scan";
+    const cancelLabel = duplicating ? "Cancel duplication" : busy && activity !== "Scanning…" ? "Cancel gesture" : "Cancel scan";
 
     if (cancel.textContent !== cancelLabel) cancel.textContent = cancelLabel;
 

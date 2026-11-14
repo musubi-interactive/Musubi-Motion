@@ -21,7 +21,13 @@ Musubi Motion treats Gaussian splats as named, selectable scene objects with the
 
 - **Splat scenes:** import local PLY, SPZ, SPLAT, KSPLAT, and SOG files; add multiple named objects; start with the included grayscale knot. Format variants depend on Spark's decoder support.
 - **FBX import:** File → Import imports textured polygon meshes, material slots, blend shapes, skeletons, skin weights, and baked animation as native, editable scene data. Files are parsed locally and the imported data survives `.msb` save/reopen and undo/redo. See [FBX import](docs/FBX-IMPORT.md) for supported features and limits.
+- **Mixamo motion.** **Animation → Import Motion Clip…** opens a local animation FBX, matches its joints to the same rig, and previews the selected take. Import creates an editable animation layer with undo and offline MSB reopen. [Motion import and matching rig requirements](docs/MIXAMO-IMPORT.md)
 - **Selection and transforms:** click or marquee selection, an Outliner, editable position/rotation/scale properties, and full X/Y/Z transform gizmos, including non-uniform scaling.
+- **Splat components.** Press **F8** to select original splats by click, box, lasso, paint, sphere, or radial region. Transform selections with World/Object gizmos or relative fields, use editable soft falloff, and hide or delete original IDs with undo. Use **Edit → Duplicate Selected Splats** to copy Gaussian data and directional color into an independent object that retains supported authored edits and skinning. See [component transforms](docs/SPLAT-COMPONENT-TRANSFORMS.md), [soft selection](docs/SPLAT-SOFT-SELECTION.md), and [duplication and limits](docs/SPLAT-EXTRACTION.md).
+- **Selection sets and masks.** Save and recall original-ID sets, or paint reusable per-splat scalar masks with a preview, component locks and undo. See [splat masks](docs/SPLAT-MASKS.md).
+- **Textures and splat appearance.** Reuse embedded PNG, JPEG, and WebP assets in the Texture Graph. Apply the graph to splat color, opacity, and scale with masked object-space or world-space projections. **Select → Paint Splat Attributes** provides a separate color and opacity brush with front-center and through selection, mask restrictions, live preview, Escape cancellation, and one undo per stroke. See [texture assets](docs/TEXTURE-ASSETS.md), [Texture Graph](docs/PROCEDURAL-TEXTURES.md), [splat appearance](docs/splat-appearance.md), and [attribute paint](docs/splat-attribute-paint.md).
+- **Mesh materials.** **View → Materials** assigns library images to a selected mesh's Base Color, Opacity, Normal, and Roughness channels. Edit existing UV sets, placement, wrap, filter, and color space. FBX face groups and UV seams are preserved. Mesh-to-splat conversion uses the authored base-color and opacity settings. [Mesh texture settings and examples](docs/MESH-MATERIALS.md)
+- **Camera depth.** **Display → Camera Depth** previews linear camera-space depth. **Export Camera Depth** saves a floating-point PFM and camera metadata in a ZIP. The depth pass uses a qualifying Gaussian center and an alpha threshold. See [depth conventions and mesh occlusion](docs/splat-depth.md).
 - **Customizable workspace:** General, Animation, Rigging, Modeling, and FX presets arrange relevant panels. Drag Dockview tabs to split or combine panels, resize with dividers, and reopen editors from their menus. Layouts and the selected preset are remembered in local browser storage.
 - **Floating tools:** icon-only selection and transform controls sit inside the viewport. Unlock the panel to move it by its grip, then lock it in place.
 - **Monochrome UI:** light/dark themes, Web Awesome menus and fields, and Lucide icons. Theme and panel layouts are remembered locally.
@@ -29,7 +35,8 @@ Musubi Motion treats Gaussian splats as named, selectable scene objects with the
 - **Channel key controls:** key individual Properties channels with their diamonds and author stepped visibility with the Visible checkbox. Indicators distinguish unanimated channels, animated channels, and keys at the current frame.
 - **Graph Editor and Dope Sheet:** dockable curve/channel editing, key multiselection and box selection, Bezier tangent handles, linear/stepped interpolation, tangent presets, shape-preserving key insertion, copy/paste, retiming, and time scaling.
 - **Set Driven Key:** connect a driver attribute to multiple driven attributes through individual response curves. Edit fractional driver coordinates and weighted tangents in the Graph Editor's Driven keys mode. Cycles and competing time keys are rejected.
-- **Animation layers:** ordered additive/override layers with weight, mute, solo, lock and active-layer editing. Keying solves the contribution needed for the requested composite pose; timeline, Graph Editor and Dope Sheet edit the active layer. Layers save in `.msb`.
+- **Animation layers.** Ordered additive and override layers support weight, mute, solo, lock and active-layer editing. Animate layer weights on dedicated curves. **Merge Layers** previews and bakes eligible layers into an editable override while retaining supported composite motion. See [animation layer limits](docs/ANIMATION.md#merge-animation-layers).
+- **Typed custom attributes.** **Edit → Add Attribute…** adds Float, Boolean, and Enum controls to objects, joints, and IK handles. Boolean and Enum choices support stepped time keys and driven relationships. Enum codes survive renaming and reordering. See [typed rig controls](docs/CUSTOM-ATTRIBUTE-TYPES.md).
 - **Rotation and joint tools:** explicit Euler filtering/channel unwrap and interpolation controls; static joint orientation, local-axis display and FK freeze; world-plane joint subtree and pose mirroring with named counterparts and optional keys.
 - **Rigging:** create and parent joints, edit FK rotations, bind selected splats to selected influences, unbind, and apply configurable elasticity. CCD IK handles support root/end chains, draggable viewport targets, FK/IK blend, target-to-FK alignment, and **Match FK to IK and key** to capture solved joint rotations and switch to FK in one undoable edit. Matching captures one frame; an existing blend curve receives a zero key, otherwise the static blend becomes zero.
 - **Two-bone IK:** select the analytic solver for a root/middle/end chain and move its pole target to control the bend plane. Target and pole markers support viewport dragging, numeric editing, undo, and saving. Unreachable targets preserve bone lengths; existing handles keep their CCD behavior.
@@ -41,8 +48,8 @@ Musubi Motion treats Gaussian splats as named, selectable scene objects with the
 - **Curve controllers:** Circle, Square, and Arrow controls with editable local CVs, rational weights, degree, closure, and color. Their ordinary transforms support animation, SDK, and constraints; curve data saves directly in the scene without asset files.
 - **Skin Weights:** a dedicated Rigging panel edits normalized influences over component ranges or exact viewport selections. Click or box-select posed components, inspect weights, restore automatic weights, and view sampled colors. Add bound joints at zero weight or remove influences with proportional redistribution and an explicit replacement for sole-influence components. Palette edits preserve effective weights on assets up to 200,000 components. Edits support undo and persistence; the elasticity pipeline inherits them.
 - **Paint Skin Weights:** a separate Rigging panel provides Replace, Add, and Subtract brushes with adjustable radius, strength, and smooth falloff. Color previews remain outside the scene until release; each stroke applies deformation with one undo step. Escape cancels a stroke.
-- **Polygon modeling:** create cubes, planes, spheres, and cylinders alongside splats. **Modeling → Mesh Tools** provides component selection and transform gizmos, numeric edits, connected face extrusion, Merge to Center, face deletion, interior-edge deletion into n-gons, shell-normal reversal, shading, and wire display. Validated edits commit as one undo step; stable component IDs persist through saving. See [the modeling guide](docs/MODELING.md) and [topology study](examples/mesh-topology-study.msb).
-- **Particle FX:** **FX → Particle Emitters** creates omni, directional, box/sphere volume, and polygon-surface emitters. Edit rate, lifetime, seeded variation, gravity/acceleration, drag, curl noise, attraction/repulsion, and lifetime size/color/opacity. Fixed-step replay supports backward scrubbing; particles retain their historical birth positions when emitters animate. Settings support undo and saving. See [the particle guide](docs/PARTICLES.md).
+- **Polygon modeling.** Create primitives and edit them with component selection, gizmos, connected face extrusion, Merge to Center, face and interior-edge deletion, and shell-normal reversal. Bevel selected edges on supported convex unskinned meshes with a live width and segment preview. See [the modeling guide](docs/MODELING.md), [topology study](examples/mesh-topology-study.msb), and [edge bevel limits](docs/mesh-bevel.md).
+- **Particle FX.** **FX → Particle Emitters** creates directional, volume and polygon-surface emitters. Edit seeded births, forces, and lifetime curves, or use graph textures to control mesh-surface emission, particle color, opacity, diameter, and forces. Bounded in-memory checkpoints accelerate deterministic timeline replay. See [particles](docs/PARTICLES.md), [surface emission maps](docs/PARTICLE-MAPS.md), and [texture fields](docs/particle-map-fields.md).
 - **Undo/redo:** editing operations use shared document commands. History retains up to 100 edits without copying splat buffers; playback and scrubbing create no history entries.
 - **Turntable preview:** the Timeline's separate playback mode retains the original 12-second rotation preview.
 - **Portable scenes:** save and reopen `.msb` packages with source assets, meshes, controllers, particle settings, joints, binding/elasticity settings, animation curves, driven relationships, IK handles, and constraints.
@@ -84,6 +91,7 @@ Open the URL printed by Vite.
 | Select object | Click a splat surface, controller line, or Outliner row |
 | Marquee select | Drag a rectangle in the viewport |
 | Toggle selection | Shift + click / marquee |
+| Enter or exit Splat Components | F8 |
 | Clear selection / cancel gizmo drag | Escape |
 | Undo | Ctrl+Z; Maya-style Z outside text fields |
 | Redo | Ctrl+Y or Ctrl+Shift+Z; Maya-style Shift+Z outside text fields |
@@ -110,8 +118,8 @@ Time keying and curve editors use the active animation layer. Driven curves use
 fractional driver values and a separate cursor that leaves scene time unchanged.
 Euler filtering is explicit because it can remove intentional spins. Mirroring
 reflects joint frames across a world-origin plane and pairs existing joints by
-name; it does not duplicate a complete control rig. Layer weights support independent key curves in Animation Layers;
-layer flattening remains future work.
+name. Layer weights support independent key curves in Animation Layers. Merge Layers
+previews the bake and reports unsupported driven or constrained motion before changing the scene.
 
 Open [examples/animation-study.msb](examples/animation-study.msb) for a procedural bounce/spin animation, a driven rotation, and a keyed three-joint FK chain. Rebuild it with `node scripts/create-animation-example.mjs`.
 
@@ -133,11 +141,23 @@ Open [examples/animated-ik-controls.msb](examples/animated-ik-controls.msb) for 
 
 Drag a **panel title tab** toward another panel's edge to split the space, or toward its center to combine them as tabs. The floating tool panel is separate: click its lock icon to unlock it, then drag the grip. An unlocked grip also supports arrow-key nudging, with Shift for larger steps.
 
+## Splat and FX examples
+
+- [Splat transform study](examples/splat-transform-study.msb) and [soft selection study](examples/splat-soft-selection.msb) show original-ID component editing, anisotropic splats, and falloff. Select a subset in the transform study to try duplication.
+- [Splat masks](examples/splat-mask-regions.msb), [attribute paint](examples/splat-attribute-paint.msb), and [projected appearance](examples/textures/splat-appearance.msb) show distinct per-object edits.
+- [Camera depth study](examples/splat-depth-study.msb) provides known-distance geometry and splats for checking the viewport and export.
+- [Layer merge](examples/layer-flatten-study.msb), [typed rig attributes](examples/custom-types-sdk.msb), and [mesh bevel](examples/modeling/mesh-bevel.msb) provide original editing fixtures.
+- [Surface emission maps](examples/particle-map-study.msb) and [particle texture fields](examples/particle-map-fields.msb) show texture-driven particle workflows.
+
+## Standalone browser tools
+
+Open [`/tools/`](tools/index.html) on the local Vite server or production build. [Splat Crop](docs/SPLAT-CROP.md) splits a Gaussian PLY by a box. [UV Layout](docs/obj-uv-layout.md) inspects existing OBJ UV islands and UDIM tiles and exports transparent PNG. [Particle Burst](docs/particle-burst.md) previews an editable JSON recipe and bakes a static Gaussian PLY.
+
 ## Scene files
 
 Use **File → New scene / Open scene / Save / Save as**. An asterisk beside the scene name indicates unsaved edits.
 
-An `.msb` file includes object names and IDs, hierarchy, transforms, shape offsets, original splat assets, polygon topology and appearance, controller curves, particle settings, joints and binding, elasticity, animation/SDK/IK data, constraints, the viewport camera, and the timeline position. Joint orientation and axis visibility, edited influences/weights, animation layers and the active layer are included. It does not store undo history, unkeyed animation previews, live particle buffers, or the UI panel arrangement.
+An `.msb` file includes hierarchy and object transforms, original and duplicated splat assets, component transforms and paint, selection sets and masks, embedded textures, the Texture Graph, projected appearance, polygon topology and material texture settings, controller curves, particle settings, skin and elasticity, typed custom attributes, animation and layer weight curves, SDK, IK, constraints, the viewport camera, and the timeline position. Undo history, unkeyed previews, live component selections, and particle replay checkpoints are transient. Workspace layouts stay in browser storage.
 
 Supported browsers can save back to a selected file through native file pickers. Other browsers download an `.msb` copy. New/Open asks before discarding unsaved edits; opening stages the scene before replacing the current one. Undo history starts fresh after opening.
 
@@ -157,7 +177,8 @@ MSB saves and opens no longer have a fixed 512 MiB cap. Assets are hashed in chu
 | Menus, dialogs, and property controls | Web Awesome web components |
 | Icons | Lucide |
 | Scene state and undo history | Zustand and Zundo |
-| Scene archive compression | fflate |
+| Scene archive storage | Blob-backed ZIP/ZIP64 via zip.js |
+| Texture Graph canvas | React Flow |
 | Application and tooling | Vanilla TypeScript, CSS, Vite, and Vitest |
 
 The document model follows Maya's transform/shape organization with stable IDs and separate asset references. UI components call scene commands; scene data, undo history, and serialization remain independent of the UI libraries. GPU resources and splat buffers stay outside undo snapshots.
@@ -168,9 +189,9 @@ Non-uniform scaling uses Spark covariance rendering with extended-precision spla
 
 1. Automatic joint orientation/limits, twist controls, blend driven by SDK, and multi-chain or adaptive IK/FK baking.
 2. Object-up and roll controls for aim constraints, multi-source constraint weights, and richer controller/component editing.
-3. Weight smoothing and locks, mirrored weight transfer, and surface-only component selection.
-4. Animated layer weights/flattening, camera/property channels, and richer curve clipboard/retargeting.
-5. Component pivot/axis options, snapping/soft selection, inset/bevel/subdivision, merge by distance, bridge, Delete Edge/Vertex cleanup, custom normals, materials/UVs, mesh skinning, and mesh import/export.
+3. Weight smoothing and locks, mirrored weight transfer, and scene-visible component selection using rendered depth.
+4. Animated cameras, motion retargeting, and richer curve clipboard operations.
+5. Component pivot and snapping tools, broader inset/subdivision and bevel coverage, topology cleanup, and expanded mesh material and UV editing.
 6. Particle collisions, trails, animated emitter properties/field objects, cache export, and splat-particle rendering.
 7. Object grouping/reparenting tools, recovery snapshots, and saving strategies for large projects.
 
@@ -180,10 +201,12 @@ Local CPU measurements were approximately **0.56 ms for 1,000 animation tracks**
 
 The dated [validation record](docs/VALIDATION.md) separates model tests, browser workflows, small-scene playback measurements, and remaining verification limits.
 
-The latest animation/rigging checkpoint passed **714 tests across 62 files**, plus
-TypeScript and the production build. Browser checks covered SDK curve edits,
-layer keying/blending, mirroring, influence edits and native `.msb` save/reopen.
-Independent review agents checked command behavior and cross-system integration.
+The local checkpoint passed 1,112 tests across 112 files, TypeScript, and the
+production build. Production Chrome checks covered selected-splat duplication,
+mesh textures and conversion, and matching-rig motion import, including undo,
+redo, and native MSB reopen. The Materials dock fits internally at 720 px and
+960 px, where the existing editor shell clips horizontally. Desktop workflows
+were exercised at 1440 px.
 The reproducible `node scripts/benchmark-animation-layers.mjs` benchmark measures
 CPU curve evaluation only; viewport rendering and skinning are excluded.
 

@@ -20,11 +20,13 @@ export function mountWorkspace(riggingContent: HTMLElement, terminalContent: HTM
   animationPanels["splat-masks"] = "Splat Sets and Masks";
   animationPanels["splat-attribute-paint"] = "Paint Splat Attributes";
   animationPanels["texture-assets"] = "Texture Assets";
+  animationPanels["materials"] = "Materials";
   animationPanels["texture-graph"] = "Texture Graph";
   animationPanels["splat-appearance"] = "Splat Appearance";
   animationPanels["joint-settings"] = "Joint Settings";
   animationPanels["rotation-curves"] = "Rotation Curves";
   animationPanels["animation-layers"] = "Animation Layers";
+  animationPanels["motion-import"] = "Motion Import";
   animationPanels["joint-mirror"] = "Mirror Joints / Pose";
   for (const id of Object.keys(animationPanels)) {
     const wrapper = document.createElement("div"); wrapper.className = "animation-dock-host";
@@ -187,10 +189,12 @@ export function mountWorkspace(riggingContent: HTMLElement, terminalContent: HTM
     attributeIds.push("splat-masks");
     attributeIds.push("splat-attribute-paint");
     attributeIds.push("texture-assets");
+    attributeIds.push("materials");
     attributeIds.push("splat-appearance");
     attributeIds.push("joint-settings");
     attributeIds.push("rotation-curves");
     attributeIds.push("animation-layers");
+    attributeIds.push("motion-import");
     attributeIds.push("joint-mirror");
     const attribute = attributeIds.includes(id);
     const sidePanel = attribute ? ["properties", "outliner", "rigging", ...attributeIds].find(candidate => api.getPanel(candidate)) : undefined;

@@ -1,5 +1,5 @@
 import { Box3, BufferAttribute, BufferGeometry, DoubleSide, DynamicDrawUsage, LineBasicMaterial, LineSegments, Mesh, MeshStandardMaterial, Vector3 } from "three";
-import { createMaterials, disposeMaterials } from "./mesh-materials.ts";
+import { applyMeshTextureUV, createMaterials, disposeMaterials, meshTextureUVEdit, type EditableTextureSlot, type TextureUVField } from "./mesh-materials.ts";
 import { meshEdges, triangulateMesh, validateMeshShape } from "./mesh-modeling.ts";
 import type { MeshShapeNode, Vec3 } from "./scene-document.ts";
 import { deformMeshPositions } from "./mesh-skin.ts";
@@ -104,6 +104,19 @@ export function createMeshRenderable(shape: MeshShapeNode, assets?: Readonly<Rec
     mesh, bounds,
     get centers() { return (topologyPreview ?? data).positions; },
     get triangleFaceIds() { return (topologyPreview ?? data).triangleFaceIds; },
+    previewTexture(index: number, slot: EditableTextureSlot, field: TextureUVField) {
+      const owner = importedMaterials?.[index], texture = owner?.[slot], source = previous.materials?.[index]?.[slot];
+      if (disposed || !texture || !source) return;
+      const isCurrent = () => !disposed && importedMaterials?.[index] === owner && owner[slot] === texture;
+      return {
+        update(value: number) {
+          if (isCurrent()) applyMeshTextureUV(texture, { ...source, ...meshTextureUVEdit(source, field, value) });
+        },
+        end() {
+          if (isCurrent()) applyMeshTextureUV(texture, source);
+        },
+      };
+    },
     /** Display validated transient topology while retaining the exact authored buffers. */
     previewTopology(next: MeshShapeNode): void {
       if (disposed || next.id !== previous.id || previous.skin || previous.morphTargets ||
@@ -162,14 +175,21 @@ export function createMeshRenderable(shape: MeshShapeNode, assets?: Readonly<Rec
       validateMeshShape(next);
       if (topologyPreview) clearPreview();
       if ((previous.skin && !next.skin) || (previous.morphTargets && !next.morphTargets)) { previewing = true; clearPreview(); }
-      if (next.vertices !== previous.vertices || next.faces !== previous.faces || next.uvs !== previous.uvs || next.uvSets !== previous.uvSets || next.normals !== previous.normals || next.materials !== previous.materials) {
+      const groupingChanged = (next.materials?.length ?? 1) > 1 !== ((previous.materials?.length ?? 1) > 1);
+      if (next.vertices !== previous.vertices || next.faces !== previous.faces || next.uvs !== previous.uvs || next.uvSets !== previous.uvSets || next.normals !== previous.normals || groupingChanged) {
         const replacement = geometryFor(next), oldGeometry = mesh.geometry, oldEdges = edges.geometry;
         mesh.geometry = replacement.geometry; edges.geometry = replacement.edges; data = replacement;
         bounds.copy(replacement.geometry.boundingBox!); previewing = false; oldGeometry.dispose(); oldEdges.dispose();
       } else clearPreview();
       if (nextAssets !== assets || next.materials !== previous.materials || next.shading !== previous.shading || next.wireframe !== previous.wireframe) {
-        if (importedMaterials) disposeMaterials(importedMaterials);
-        importedMaterials = next.materials ? createMaterials(next.materials, next.shading === "flat", next.wireframe, nextAssets) : undefined;
+        const old = importedMaterials;
+        const sameRenderSettings = nextAssets === assets && next.shading === previous.shading && next.wireframe === previous.wireframe;
+        importedMaterials = next.materials?.map((value, index) => {
+          const current = old?.[index];
+          if (current && sameRenderSettings && value === previous.materials?.[index]) return current;
+          return createMaterials([value], next.shading === "flat", next.wireframe, nextAssets)[0];
+        });
+        if (old) disposeMaterials(old.filter(value => !importedMaterials?.includes(value)));
         mesh.material = importedMaterials ? (importedMaterials.length === 1 ? importedMaterials[0] : importedMaterials) as unknown as MeshStandardMaterial : material;
       }
       const flatShading = next.shading === "flat";

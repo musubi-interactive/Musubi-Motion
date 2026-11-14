@@ -20,6 +20,7 @@ import { validateParticleShape, validateParticleEmitters } from "./particle-emit
 import { validateConstraints } from "./constraints.ts";
 import { validateCurveShape } from "./controller-curves.ts";
 import { validateSkinWeights } from "./skin-weights.ts";
+import { isSplatExtractionFile, splatExtractionRetainedBytes, SPLAT_EXTRACTION_MAX_FILE_BYTES, SPLAT_EXTRACTION_RETAINED_BYTES } from "./splat-extraction.ts";
 import type { SceneDocument, Vec3 } from "./scene-document.ts";
 
 // Retained as a compatibility export; project size is limited by the browser, not 512 MiB.
@@ -96,6 +97,7 @@ export function validateScene(value: unknown): SceneDocument {
   const parents = new Map<string, string | null>(),
     shapeCounts = new Map<string, number>();
   const siblingNames = new Set<string>();
+  let extractionFiles = 0;
   for (const [key, value] of Object.entries(assets)) {
     id(key);
     const asset = record(value);
@@ -107,7 +109,7 @@ export function validateScene(value: unknown): SceneDocument {
         typeof asset.fileName !== "string" ||
         asset.fileName.length > 255 ||
         /[\\/\x00]/.test(asset.fileName) ||
-        !/\.(ply|spz|splat|ksplat|sog)$/i.test(asset.fileName)
+        !/\.(ply|spz|splat|ksplat|sog|msext)$/i.test(asset.fileName)
       )
         fail("Unsupported splat filename.");
       if (
@@ -115,9 +117,15 @@ export function validateScene(value: unknown): SceneDocument {
         (asset.byteLength as number) <= 0
       )
         fail(`Invalid asset size for ${asset.fileName}: expected a positive whole number of bytes.`);
+      if (isSplatExtractionFile(asset.fileName as string)) {
+        if ((asset.byteLength as number) > SPLAT_EXTRACTION_MAX_FILE_BYTES)
+          fail("Duplicated splat asset exceeds the supported file size.");
+        extractionFiles += splatExtractionRetainedBytes(asset.byteLength as number);
+        if (extractionFiles > SPLAT_EXTRACTION_RETAINED_BYTES) fail("Scene exceeds the 64 MiB duplicated splat asset budget.");
+      }
     } else fail("Unsupported asset type.");
   }
-  let transformedSplatCount = 0;
+  let transformedSplatCount = 0, extractionBytes = 0;
   for (const [key, value] of Object.entries(nodes)) {
     id(key);
     const node = record(value);
@@ -178,6 +186,11 @@ export function validateScene(value: unknown): SceneDocument {
       id(node.assetId);
       if (!Object.hasOwn(assets, node.assetId))
         fail("Missing asset reference.");
+      const asset = assets[node.assetId] as SceneDocument["assets"][string];
+      if (asset.kind === "file" && isSplatExtractionFile(asset.fileName)) {
+        extractionBytes += splatExtractionRetainedBytes(asset.byteLength);
+        if (extractionBytes > SPLAT_EXTRACTION_RETAINED_BYTES) fail("Scene exceeds the 64 MiB duplicated splat asset budget.");
+      }
       vector(node.offset);
       shapeCounts.set(
         parent as string,

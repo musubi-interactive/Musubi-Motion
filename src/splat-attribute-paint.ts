@@ -139,6 +139,26 @@ function historyBytes(doc: SceneDocument, seen: Set<object>) {
   return bytes;
 }
 
+export function assertSplatPaintUndoFits(before: SceneDocument, next: SceneDocument) {
+  const seen = new Set<object>();
+  if (historyBytes(next, seen) + historyBytes(before, seen) > ATTRIBUTE_PAINT_LIMITS.historyBytes)
+    throw Error("This edit exceeds the immediate undo budget for splat paint.");
+}
+
+export function trimSplatPaintHistory(store: SceneStore) {
+  const history = store.temporal.getState();
+  const seen = new Set<object>();
+  let bytes = historyBytes(store.getState().document, seen);
+  let keep = history.pastStates.length;
+  while (keep > 0) {
+    const older = history.pastStates[keep - 1].document;
+    if (older) bytes += historyBytes(older, seen);
+    if (bytes > ATTRIBUTE_PAINT_LIMITS.historyBytes) break;
+    keep--;
+  }
+  if (keep > 0) store.temporal.setState({ pastStates: history.pastStates.slice(keep) });
+}
+
 export function commitSplatAttributePaint(store: SceneStore, identity: SplatSelectionIdentity, base: SplatShapeNode,
   paint: SplatAttributePaint | undefined, label = "Paint splat attributes") {
   const doc = store.getState().document, shape = doc.nodes[identity.shapeId];
@@ -152,18 +172,8 @@ export function commitSplatAttributePaint(store: SceneStore, identity: SplatSele
   const document = { ...doc, nodes: { ...doc.nodes, [shape.id]: next } };
   const rows = Object.values(document.nodes).reduce((sum, node) => sum + (node.type === "splatShape" ? node.attributePaint?.records.length ?? 0 : 0), 0);
   if (rows > ATTRIBUTE_PAINT_LIMITS.scene) throw Error("Scene paint would exceed 250,000 edited originals; no paint was applied.");
-  const seen = new Set<object>();
-  let bytes = historyBytes(document, seen) + historyBytes(doc, seen);
-  if (bytes > ATTRIBUTE_PAINT_LIMITS.historyBytes) throw Error("This paint edit exceeds the immediate undo budget.");
+  assertSplatPaintUndoFits(doc, document);
   store.setState({ document, editLabel: label });
-  const history = store.temporal.getState();
-  let keep = history.pastStates.length - 1;
-  while (keep > 0) {
-    const older = history.pastStates[keep - 1].document;
-    if (older) bytes += historyBytes(older, seen);
-    if (bytes > ATTRIBUTE_PAINT_LIMITS.historyBytes) break;
-    keep--;
-  }
-  if (keep > 0) store.temporal.setState({ pastStates: history.pastStates.slice(keep) });
+  trimSplatPaintHistory(store);
   return true;
 }

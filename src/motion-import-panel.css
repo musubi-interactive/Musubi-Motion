@@ -1,0 +1,60 @@
+.motion-import-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-sizing: border-box;
+  padding: 12px;
+  color: var(--text);
+  background: var(--panel);
+  font-size: 12px;
+}
+.motion-import-panel .motion-content { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.motion-import-panel label { display: grid; gap: 4px; margin: 0 0 8px; }
+.motion-import-panel input,
+.motion-import-panel select,
+.motion-import-panel button {
+  min-width: 0;
+  box-sizing: border-box;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 5px;
+}
+.motion-import-panel select,
+.motion-import-panel input { width: 100%; }
+.motion-import-panel input[type=range] { accent-color: var(--strong); }
+.motion-import-panel button:not(:disabled) { cursor: pointer; }
+.motion-import-panel :disabled { opacity: .5; }
+.motion-import-panel :focus-visible { outline: 1px solid var(--strong); }
+.motion-import-panel fieldset { min-width: 0; margin: 0 0 8px; padding: 8px; border: 1px solid var(--line); }
+.motion-import-panel legend,
+.motion-import-panel small,
+.motion-import-panel p { color: var(--muted); }
+.motion-import-panel .motion-mapping { max-height: 132px; overflow: auto; }
+.motion-import-panel table { table-layout: fixed; width: 100%; border-collapse: collapse; margin-top: 8px; }
+.motion-import-panel th,
+.motion-import-panel td {
+  padding: 4px;
+  border-bottom: 1px solid var(--line);
+  font-weight: normal;
+  text-align: left;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+}
+.motion-import-panel thead th { font-weight: 600; }
+.motion-import-panel small { display: block; }
+.motion-import-panel canvas {
+  display: block;
+  width: 100%;
+  max-height: 166px;
+  object-fit: contain;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  margin-bottom: 8px;
+}
+.motion-import-panel output { display: block; margin-bottom: 8px; }
+.motion-import-panel p { line-height: 1.45; margin-bottom: 0; }
+.motion-import-panel .motion-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 8px; }

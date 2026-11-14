@@ -15,11 +15,19 @@ type TestRaster = { width: number; height: number; data: number[] };
 function browserRasters(rasters: Record<string, TestRaster>) {
   vi.stubGlobal("Image", class {
     naturalWidth=0; naturalHeight=0; onload?: () => void; onerror?: () => void; uri="";
+    get pixels() { return rasters[this.uri].data; }
     set src(value:string) { this.uri=value; const raster=rasters[value]; if (!raster) { this.onerror?.(); return; } this.naturalWidth=raster.width; this.naturalHeight=raster.height; this.onload?.(); }
   });
   vi.stubGlobal("document", { createElement: () => {
-    let uri="";
-    return {width:0,height:0,getContext:()=>({drawImage(image:{uri:string}){uri=image.uri;},getImageData:()=>({data:new Uint8ClampedArray(rasters[uri].data)})})};
+    let pixels: number[] = [];
+    return { width: 0, height: 0, getContext: () => ({
+      isContextLost: () => false, getParameter: () => 8192,
+      createTexture: () => ({}), createFramebuffer: () => ({}), bindTexture() {}, pixelStorei() {},
+      texImage2D(_target: unknown, _level: unknown, _internal: unknown, _format: unknown, _type: unknown, image: { pixels: number[] }) { pixels = image.pixels; },
+      bindFramebuffer() {}, framebufferTexture2D() {}, checkFramebufferStatus: () => 1, FRAMEBUFFER_COMPLETE: 1,
+      readPixels(_x: number, _y: number, _w: number, _h: number, _format: unknown, _type: unknown, result: Uint8Array) { result.set(pixels); },
+      getError: () => 0, NO_ERROR: 0, deleteTexture() {}, deleteFramebuffer() {},
+    }) };
   } });
 }
 function browserRaster(data:number[], width=1, height=1) { browserRasters({[texture.dataURI]:{width,height,data}}); }
@@ -38,6 +46,18 @@ it("filters across repeat seams while clamp and mirror retain edge texels", () =
   expect(repeat.r).toBeCloseTo(.5); expect(repeat.g).toBeCloseTo(.5);
   expect(sampleSplatTexture(raster, texture, new Vector2(0, .25)).toArray()).toEqual([1, 0, 0]);
   expect(sampleSplatTexture(raster, { ...texture, wrapS: 1002 }, new Vector2(0, .25)).toArray()).toEqual([1, 0, 0]);
+});
+it("samples nearest across repeat/mirror texel boundaries and flips the addressed image row", () => {
+  const nearest = { ...texture, filter: "nearest" as const };
+  for (const x of [-.5, 1.5])
+    expect(sampleSplatTexture(raster, { ...nearest, wrapS: 1002 }, new Vector2(x, .25)).toArray()).toEqual([1, 0, 0]);
+  expect(sampleSplatTexture(raster, { ...nearest, wrapS: 1000 }, new Vector2(1, .25)).toArray()).toEqual([1, 0, 0]);
+  expect(sampleSplatTexture(raster, { ...nearest, flipY: true }, new Vector2(.25, .5)).toArray()).toEqual([1, 0, 0]);
+});
+it("uses raw RGB on color bindings when requested", () => {
+  const grey = { width: 1, height: 1, data: new Uint8ClampedArray([128, 128, 128, 255]) };
+  expect(sampleSplatTexture(grey, texture, new Vector2(.5, .5)).r).toBeCloseTo(.21586, 4);
+  expect(sampleSplatTexture(grey, { ...texture, colorSpace: "raw" }, new Vector2(.5, .5)).r).toBeCloseTo(128 / 255, 6);
 });
 it("uses linear material colors and opaque shape fallback", async () => {
   const sampler = await createMeshSplatColors(shape);
@@ -66,6 +86,21 @@ it("uses raw green values for opacity and supports opacity maps without diffuse 
   const sampler = await createMeshSplatColors({...texturedShape,materials:[{...material,alphaMap:texture}]});
   expect(sampler.sampleSurface(ids,bary,0).opacity).toBeCloseTo(128/255);
   expect(sampler.sample(ids,bary,0).toArray()).toEqual([1,1,1]);
+});
+it("keeps bilinear samples of fully opaque texels inside the valid opacity range", async () => {
+  browserRaster(new Array<number>(16).fill(255), 2, 2);
+  const shape = { ...texturedShape, uvs: { ...texturedShape.uvs, a: [.2574626865671642, .47139303482587064] },
+    materials: [{ ...material, map: texture, alphaMap: texture }] } as MeshShapeNode;
+  const sampler = await createMeshSplatColors(shape);
+  expect(sampler.sampleSurface(ids, bary, 0).opacity).toBe(1);
+});
+it("samples authored opacity data independently of the source image's own alpha", async () => {
+  browserRaster([240,128,60,0]);
+  const sampler = await createMeshSplatColors({
+    ...texturedShape,
+    materials: [{ ...material, transparent: false, alphaMap: { ...texture, useImageAlpha: true, colorSpace: "raw" } }],
+  });
+  expect(sampler.sampleSurface(ids,bary,0).opacity).toBeCloseTo(128 / 255);
 });
 it("multiplies diffuse alpha, green opacity map, and scalar opacity", async () => {
   const alphaURI="data:image/png;base64,AQ==";
