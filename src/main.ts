@@ -1136,6 +1136,7 @@ async function start() {
       const transformValue = splatTransformPreview?.shapeId === shape.id ? splatTransformPreview.value : shape.componentTransforms;
       const editChanged = object.edits?.value !== shape.componentEdits;
       const frame = timelinePanel?.turntable ? animationSettings().start : getFrame();
+      const sourceChanged = transforms.setBound(!!shape.binding, shape.elasticity);
       let transformChanged = false;
       try {
         transformChanged = transforms.update(transformValue, deformerPanel?.deformersForShape(shape) ?? shape.deformers, shape.scalarMasks, frame, splatMorphPose(shape, evaluated.get(shape.parentId)?.morphWeights));
@@ -1143,7 +1144,6 @@ async function start() {
         notice.textContent = (error as Error).message;
         // Keep the last complete geometry when a candidate pose fails validation.
       }
-      transforms.setBound(!!shape.binding, !!shape.elasticity);
       if (object.edits?.value !== shape.componentEdits) {
         if (!shape.componentEdits) { object.edits?.mask.dispose(); object.edits = undefined; }
         else {
@@ -1160,7 +1160,7 @@ async function start() {
           }
         }
       }
-      if (transformChanged || editChanged || shape.elasticity) object.transformedBounds = undefined;
+      if (sourceChanged || transformChanged || editChanged || shape.elasticity) object.transformedBounds = undefined;
       if (!shape.binding) {
         applySplatPaintRuntime(shape, object, shape.attributePaint);
         continue;

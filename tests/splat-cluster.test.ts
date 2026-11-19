@@ -108,6 +108,32 @@ describe("weighted cluster stack", () => {
     mesh.dispose();
   });
 
+  it("invalidates fixed-frame geometry on elastic reconfiguration and restoration", async () => {
+    const mesh = makeDemo(), { count } = await prepareSplat(mesh);
+    const runtime = createSplatTransformRuntime(mesh), source = mesh.extSplats!;
+    const stack = [{ ...translated(entry("move", count), 2), weights: [{ index: 0, weight: 1 }] }];
+    const onlyFirst = (index: number) => index === 0;
+    const original = source.getSplat(0);
+    const scales = original.scales.clone(), center = original.center.clone(), rotation = original.quaternion.clone(), color = original.color.clone();
+    const rewrite = (stretch: number) => source.setSplat(0, center, scales.clone().multiplyScalar(stretch), rotation, original.opacity, color);
+    runtime.update(undefined, stack);
+    const before = runtime.bounds(onlyFirst);
+    const elastic = { stretch: 1, spacing: 2, expansion: 1, budget: 1, joints: null };
+    expect(runtime.setBound(true, elastic)).toBe(true);
+    expect(runtime.setBound(true, elastic)).toBe(false);
+    rewrite(3);
+    runtime.update(undefined, stack);
+    const wide = runtime.bounds(onlyFirst).getSize(new Vector3()).length();
+    expect(wide).toBeGreaterThan(before.getSize(new Vector3()).length() * 2.9);
+    expect(runtime.setBound(true, { ...elastic, stretch: .5 })).toBe(true);
+    rewrite(1);
+    expect(runtime.setBound(true)).toBe(true);
+    runtime.update(undefined, stack);
+    expect(runtime.bounds(onlyFirst).equals(before)).toBe(true);
+    expect(runtime.setBound(true)).toBe(false);
+    runtime.dispose(); mesh.dispose();
+  });
+
   it("stages transforms before skinning and preserves the previous runtime on invalid preview", async () => {
     const mesh = makeDemo(), data = await prepareSplat(mesh);
     const runtime = createSplatTransformRuntime(mesh), original = mesh.extSplats!.getSplat(0).center.clone();

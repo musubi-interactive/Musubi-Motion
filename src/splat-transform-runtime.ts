@@ -1,5 +1,6 @@
 import { dyno, type SplatMesh } from "@sparkjsdev/spark";
 import { Box3, DataTexture, FloatType, Matrix4, Ray, RGBAFormat, Sphere, Vector3, type Raycaster } from "three";
+import type { Elasticity } from "./elasticity.ts";
 import type { SplatAppearanceRead } from "./splat-appearance-runtime.ts";
 import { type SplatComponentTransforms } from "./splat-component-transforms.ts";
 import { prepareSplatDeformerEvaluation, type SplatDeformer } from "./splat-deformers.ts";
@@ -15,11 +16,12 @@ const NO_MASKS: readonly SplatScalarMask[] = [];
  * keeps the texture within WebGL2 minimum dimension limits. */
 export function createSplatTransformRuntime(mesh: SplatMesh) {
   type Pose = { component?: SplatComponentTransforms; deformers: readonly SplatDeformer[];
-    masks: readonly SplatScalarMask[]; frame: number; morph?: SplatMorphPose };
+    masks: readonly SplatScalarMask[]; frame: number; morph?: SplatMorphPose; sourceRevision: number };
   type Packed = { data: Float32Array<ArrayBuffer>; count: number; direct: boolean; value?: SplatComponentTransforms };
   type Prepared = { pose: Pose; packed: Packed };
   let current: Prepared | undefined, previous: Prepared | undefined, prepared: Prepared | undefined;
-  let bound = false, dynamicSource = false, disposed = false;
+  let bound = false, disposed = false, sourceRevision = 0;
+  let dynamicSource: Elasticity | undefined;
   let metadata: Float32Array | undefined, metadataReady: Uint8Array | undefined;
   // Exact rest factors for repeatedly queried bounds, allocated only for character-sized sources.
   let boundFactors: Float64Array | undefined;
@@ -67,11 +69,11 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
   mesh.covObjectModifiers = [...(mesh.covObjectModifiers ?? []), modifier];
   mesh.updateGenerator();
   function pose(component: SplatComponentTransforms | undefined, deformers = NO_DEFORMERS, masks = NO_MASKS, frame = 0, morph?: SplatMorphPose): Pose {
-    return { component, deformers, masks: deformers.some(d => d.maskId) ? masks : NO_MASKS,
+    return { component, deformers, sourceRevision, masks: deformers.some(d => d.maskId) ? masks : NO_MASKS,
       frame: deformers.some(d => d.keys?.length) ? frame : 0, morph };
   }
   function matches(a: Pose, b: Pose) {
-    return a.component === b.component && a.deformers === b.deformers && a.masks === b.masks && a.frame === b.frame &&
+    return a.sourceRevision === b.sourceRevision && a.component === b.component && a.deformers === b.deformers && a.masks === b.masks && a.frame === b.frame &&
       (a.morph === b.morph || a.morph?.surface === b.morph?.surface && a.morph?.weights.length === b.morph?.weights.length &&
         a.morph?.weights.every((weight, i) => weight === b.morph!.weights[i]));
   }
@@ -208,17 +210,22 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
       mesh.updateVersion();
       return true;
     },
-    setBound(next: boolean, elastic = false) {
-      if (dynamicSource !== elastic) {
+    setBound(next: boolean, elastic?: Elasticity) {
+      // Switching or removing elasticity restores original source scales before a
+      // replacement binding applies its own stretches. Invalidate even at a fixed frame.
+      const sourceChanged = dynamicSource !== elastic;
+      if (sourceChanged) {
         dynamicSource = elastic;
+        sourceRevision++;
         metadata = metadataReady = boundFactors = undefined;
         previous = prepared = undefined;
       }
-      if (next === bound) return;
+      if (next === bound) return sourceChanged;
       bound = next;
       mesh.covObjectModifiers = mesh.covObjectModifiers?.filter(candidate => candidate !== modifier);
       if (!bound) mesh.covObjectModifiers = [...(mesh.covObjectModifiers ?? []), modifier];
       mesh.updateGenerator();
+      return sourceChanged;
     },
     positions(indices: readonly number[], appearance?: SplatAppearanceRead, includeTransparent = false) {
       const result = new Float32Array(indices.length * 3);
