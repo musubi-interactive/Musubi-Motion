@@ -679,7 +679,7 @@ async function start() {
     if (!context || !identity || playing || loading || pendingComponentPick !== undefined) throw Error("Select visible splats before transforming them.");
     context.object.mesh.updateWorldMatrix(true, false);
     const source = context.object.mesh.extSplats ?? context.object.mesh.packedSplats!;
-    const pose = timelineSplatMorphPose(store.getState().document, context.shape, frame);
+    const pose = timelineSplatMorphPose(store.getState().document, context.shape, getFrame());
     const morph = pose && prepareSplatMorphPose(pose);
     const snapshot = captureSplatComponentTransform({ document: store.getState().document, identity, selected: splatComponentIds,
       weights: splatComponentWeights, weightFrame: { mode, pivot: useGizmoPivot ? splatComponentProxy.position.clone() : undefined, basis: objectOrientation === "object" ? context.object.mesh.getWorldQuaternion(new THREE.Quaternion()).normalize() : new THREE.Quaternion() },
