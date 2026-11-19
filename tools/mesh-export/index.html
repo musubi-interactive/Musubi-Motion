@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mesh Export · Musubi Motion</title>
+  </head>
+  <body>
+    <header><a href="../">Tools</a></header>
+    <main>
+      <h1>Mesh Export</h1>
+      <section aria-labelledby="source-heading">
+        <h2 id="source-heading">Source</h2>
+        <button id="choose-source" type="button" aria-describedby="source-status">Choose MSB…</button>
+        <input id="source" type="file" accept=".msb" hidden />
+        <p id="source-status" role="status">Your project file is processed in this browser.</p>
+      </section>
+      <section aria-labelledby="meshes-heading" id="mesh-section" hidden>
+        <div class="bar">
+          <h2 id="meshes-heading">Polygon Meshes</h2>
+          <div class="buttons">
+            <button id="select-all" type="button">Select all</button>
+            <button id="clear" type="button">Clear</button>
+          </div>
+        </div>
+        <ul id="meshes"></ul>
+        <p id="selection-status" role="status"></p>
+      </section>
+      <section aria-labelledby="export-heading">
+        <h2 id="export-heading">OBJ Export Options</h2>
+        <form id="export-form">
+          <fieldset id="options" disabled>
+            <div class="fields">
+              <label>Coordinates
+                <select id="space">
+                  <option value="world">World at frame</option>
+                  <option value="local">Source mesh-local</option>
+                </select>
+              </label>
+              <label>Frame
+                <input id="frame" type="number" step="any" required aria-describedby="frame-range" />
+              </label>
+              <label>Faces
+                <select id="topology">
+                  <option value="polygons">Keep polygons</option>
+                  <option value="triangles">Use editor triangles</option>
+                </select>
+              </label>
+            </div>
+            <p id="frame-range"></p>
+          </fieldset>
+          <p id="obj-contents">OBJ includes geometry, primary UVs and stored normals where present. Materials, textures, extra UV sets, smoothing settings, visibility, hierarchy and animation data are omitted. Other scene objects are excluded.</p>
+          <button id="download" type="submit" disabled aria-describedby="obj-contents">Download OBJ</button>
+          <p id="export-status" role="status"></p>
+        </form>
+      </section>
+    </main>
+    <script type="module" src="/src/mesh-export/page.ts"></script>
+  </body>
+</html>
