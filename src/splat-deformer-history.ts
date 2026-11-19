@@ -40,4 +40,3 @@ export function trimSplatDeformerHistory(store: SceneStore) {
   }
   if (first) store.temporal.setState({ pastStates: past.slice(first) });
 }
-
