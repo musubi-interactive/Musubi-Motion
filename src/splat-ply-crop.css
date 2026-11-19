@@ -1,5 +1,4 @@
-:root {
-  color-scheme: dark;
+:root {color-scheme: dark;
   font-family: "Segoe UI", system-ui, sans-serif;
   font-size: 14px;
   background: #151515;
@@ -43,7 +42,7 @@
 body { margin: 0; }
 a { color: inherit; }
 button, input { font: inherit; }
-button, input[type="number"] {
+button, input[type="number"], input[type="text"] {
   min-height: 30px;
   color: inherit;
   background: var(--control);
@@ -120,7 +119,7 @@ th[scope="col"] { text-align: right; padding-right: 3px; }
 .history { display: flex; gap: 6px; margin: 5px 4px 0; }
 .export { margin-top: 16px; padding: 12px 4px 0; border-top: 1px solid var(--line); }
 .export h2 { margin-bottom: 8px; }
-.export div { display: flex; justify-content: space-between; margin: 9px 0 5px; color: var(--quiet); }
+.export .stat, #crop-exports div { display: flex; justify-content: space-between; margin: 9px 0 5px; color: var(--quiet); }
 .export output { color: inherit; font-variant-numeric: tabular-nums; }
 .export button { width: 100%; }
 .status-bar { min-height: 54px; justify-content: flex-start; border-radius: 0 0 6px 6px; }
@@ -139,3 +138,60 @@ th[scope="col"] { text-align: right; padding-right: 3px; }
   canvas { height: clamp(125px, 23vw, 190px); }
   .projections figure:first-child canvas { height: clamp(160px, 31vw, 260px); }
 }
+
+.tool-mode {
+  display: flex;
+  gap: 4px;
+  padding: 7px 12px;
+  border-inline: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.tool-mode button[aria-pressed="true"], #region-list button[aria-pressed="true"] {
+  background: var(--hover);
+  border-color: var(--quiet);
+}
+
+#regions-panel { margin-bottom: 10px; }
+.guide { margin-top: 5px; color: var(--quiet); font-size: .85rem; }
+#region-list {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  max-height: 13rem;
+  overflow: auto;
+  margin: 8px 0;
+  padding: 2px;
+}
+#region-list:empty { display: none; }
+#region-list button {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  padding-inline: 7px;
+}
+#region-list button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#region-list output { color: var(--quiet); font-variant-numeric: tabular-nums; }
+.region-name { display: flex; align-items: center; gap: 8px; }
+.region-name input { flex: 1; min-width: 0; padding: 4px 6px; background: var(--field); }
+.region-enabled { display: flex; align-items: center; gap: 5px; margin-block: 6px; }
+.region-actions, .recipe-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.region-actions button { padding-inline: 7px; }
+.recipe-actions { margin-top: 7px; }
+.recipe-actions button { flex: 1 1 auto; width: auto; padding-inline: 7px; }
+#recount { margin-bottom: 5px; }
+#bound-menu {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 3px;
+  color: inherit;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.region-enabled input { accent-color: var(--quiet); }

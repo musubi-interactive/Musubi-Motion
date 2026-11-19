@@ -23,11 +23,15 @@
           <button id="open-example" type="button">Load example</button>
         </div>
       </section>
+      <nav class="tool-mode" aria-label="Splat Crop mode">
+        <button id="mode-crop" type="button" aria-pressed="true">Single crop</button>
+        <button id="mode-regions" type="button" aria-pressed="false">Regions</button>
+      </nav>
       <section class="workbench" aria-label="Crop workbench">
         <div class="preview">
           <div class="preview-title">
             <h2>Center projections</h2>
-            <span>Drag in a view to set two bounds</span>
+            <span id="drag-guide">Drag in a view to set two bounds</span>
           </div>
           <div class="projections">
             <figure>
@@ -44,35 +48,67 @@
             </figure>
           </div>
           <div class="legend">
-            <span><i class="included"></i> Inside</span>
-            <span><i class="excluded"></i> Outside</span>
+            <span><i class="included"></i> <span id="inside-legend">Inside</span></span>
+            <span><i class="excluded"></i> <span id="outside-legend">Outside</span></span>
             <span id="sample-label"></span>
           </div>
         </div>
-        <aside class="inspector" aria-labelledby="bounds-title">
-          <div class="inspector-title">
-            <h2 id="bounds-title">Crop bounds</h2>
-            <button id="fit-bounds" type="button" disabled>Reset</button>
+        <aside class="inspector" aria-label="Crop controls">
+          <section id="regions-panel" aria-labelledby="regions-title" hidden>
+            <div class="inspector-title">
+              <h2 id="regions-title">Regions</h2>
+              <button id="add-region" type="button">Add region</button>
+            </div>
+            <p class="guide">The first enabled box that contains a center owns it. Unmatched centers go to Remainder.</p>
+            <p class="guide" id="no-regions">No regions defined.</p>
+            <ol id="region-list" aria-label="Regions in priority order"></ol>
+            <div id="selected-region" hidden>
+              <label class="region-name">Name <input id="region-name" type="text" maxlength="48" spellcheck="false"></label>
+              <label class="region-enabled"><input id="region-enabled" type="checkbox"> Enabled</label>
+              <div class="region-actions">
+                <button id="region-earlier" type="button" title="Move region earlier in priority">Earlier</button>
+                <button id="region-later" type="button" title="Move region later in priority">Later</button>
+                <button id="remove-region" type="button">Remove</button>
+              </div>
+            </div>
+          </section>
+          <div id="bounds-controls">
+            <div class="inspector-title">
+              <h2 id="bounds-title">Crop bounds</h2>
+              <button id="fit-bounds" type="button" disabled>Reset</button>
+            </div>
+            <table aria-label="Source-space bounds">
+              <thead><tr><td></td><th scope="col">Min</th><th scope="col">Max</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">X</th><td><input id="min-x" type="number" step="any" aria-label="Minimum X" disabled></td><td><input id="max-x" type="number" step="any" aria-label="Maximum X" disabled></td></tr>
+                <tr><th scope="row">Y</th><td><input id="min-y" type="number" step="any" aria-label="Minimum Y" disabled></td><td><input id="max-y" type="number" step="any" aria-label="Maximum Y" disabled></td></tr>
+                <tr><th scope="row">Z</th><td><input id="min-z" type="number" step="any" aria-label="Minimum Z" disabled></td><td><input id="max-z" type="number" step="any" aria-label="Maximum Z" disabled></td></tr>
+              </tbody>
+            </table>
           </div>
-          <table aria-label="Source-space bounds">
-            <thead><tr><td></td><th scope="col">Min</th><th scope="col">Max</th></tr></thead>
-            <tbody>
-              <tr><th scope="row">X</th><td><input id="min-x" type="number" step="any" aria-label="Minimum X" disabled></td><td><input id="max-x" type="number" step="any" aria-label="Maximum X" disabled></td></tr>
-              <tr><th scope="row">Y</th><td><input id="min-y" type="number" step="any" aria-label="Minimum Y" disabled></td><td><input id="max-y" type="number" step="any" aria-label="Maximum Y" disabled></td></tr>
-              <tr><th scope="row">Z</th><td><input id="min-z" type="number" step="any" aria-label="Minimum Z" disabled></td><td><input id="max-z" type="number" step="any" aria-label="Maximum Z" disabled></td></tr>
-            </tbody>
-          </table>
           <div class="history">
             <button id="undo" type="button" disabled>Undo</button>
             <button id="redo" type="button" disabled>Redo</button>
           </div>
-          <div class="export">
+          <div class="export" id="crop-exports">
             <h2>Download PLY</h2>
             <div><span>Inside</span><output id="inside-count" aria-label="Inside splats">—</output></div>
             <button id="export-inside" type="button" disabled>Download inside</button>
             <div><span>Outside</span><output id="outside-count" aria-label="Outside splats">—</output></div>
             <button id="export-outside" type="button" disabled>Download outside</button>
           </div>
+          <section class="export" id="partition-exports" aria-labelledby="partition-title" hidden>
+            <h2 id="partition-title">Partition</h2>
+            <div class="stat"><span>Overlap</span><output id="overlap-count" aria-label="Centers inside multiple enabled regions">—</output></div>
+            <div class="stat"><span>Remainder</span><output id="remainder-count" aria-label="Unassigned centers">—</output></div>
+            <button id="recount" type="button" hidden>Count again</button>
+            <button id="export-partition" type="button">Download partition ZIP</button>
+            <div class="recipe-actions">
+              <input id="recipe-file" type="file" accept=".json,application/json" hidden>
+              <button id="open-recipe" type="button">Open recipe</button>
+              <button id="save-recipe" type="button">Save recipe</button>
+            </div>
+          </section>
         </aside>
       </section>
       <footer class="status-bar">
@@ -81,6 +117,9 @@
         <button id="cancel-job" type="button" hidden>Cancel</button>
       </footer>
     </main>
+    <div id="bound-menu" popover="auto">
+      <button id="bound-menu-action" type="button"></button>
+    </div>
     <script type="module" src="../../src/splat-ply-crop-page.ts"></script>
   </body>
 </html>

@@ -1,6 +1,8 @@
 import "./splat-ply-crop.css";
 import { containsCenter, type CropBounds, type CropSide } from "./splat-ply-crop";
-import type { CropReply, CropRequest } from "./splat-ply-crop-worker";
+import type { CropJob, CropReply, CropRequest } from "./splat-ply-crop-worker";
+import { checkRegionName, MAX_REGIONS, type CaptureRegion } from "./splat-ply-region-spec";
+import type { PartitionSummary } from "./splat-ply-regions";
 import { createCropExample } from "../tools/splat-crop/create-example";
 
 const get = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -11,6 +13,9 @@ const inputs = {
   max: [field("max-x"), field("max-y"), field("max-z")],
 };
 const source = field("source-file");
+const recipeFile = field("recipe-file");
+const nameField = field("region-name");
+const enabledField = field("region-enabled");
 const progress = get<HTMLProgressElement>("progress");
 const theme = matchMedia("(prefers-color-scheme: light)");
 const views = [
@@ -19,63 +24,140 @@ const views = [
   { canvas: get<HTMLCanvasElement>("side"), axes: [1, 2] },
 ] as const;
 type View = typeof views[number];
-type Job = Extract<CropRequest, { kind: "load" | "count" | "export" }>;
 type Loaded = Extract<CropReply, { kind: "loaded" }>;
+type RegionState = { regions: CaptureRegion[]; selected: number };
 const worker = new Worker(new URL("./splat-ply-crop-worker.ts", import.meta.url), { type: "module" });
 const number = new Intl.NumberFormat();
-let job: Job | undefined;
+const boundMenu = get("bound-menu");
+const lockedBounds = new Set<HTMLInputElement>();
+let lockedField: HTMLInputElement | undefined;
+let mode: "crop" | "regions" = "crop";
+let job: CropJob | undefined;
 let jobId = 0;
 let countStatus: string | undefined;
 let asset: Loaded | undefined;
 let name = "";
-let bounds: CropBounds | undefined;
+let cropBounds: CropBounds | undefined;
 let inside: number | undefined;
+let cropUndo: CropBounds[] = [];
+let cropRedo: CropBounds[] = [];
+let regionState: RegionState = { regions: [], selected: -1 };
+let regionUndo: RegionState[] = [];
+let regionRedo: RegionState[] = [];
+let summary: PartitionSummary | undefined;
+let bounds: CropBounds | undefined;
 let draft: CropBounds | undefined;
 let editedField: HTMLInputElement | undefined;
 let invalidField: HTMLInputElement | undefined;
-let undo: CropBounds[] = [];
-let redo: CropBounds[] = [];
 let frame = 0;
 let cancelGesture: (() => void) | undefined;
 let downloadUrl: string | undefined;
 let downloadTimer = 0;
 
-const editingBlocked = () => job?.kind === "load" || job?.kind === "export";
+const isCount = () => job?.kind === "count" || job?.kind === "count-partition";
+const editingBlocked = () => !!job && !isCount();
 const copy = (box: CropBounds): CropBounds => ({ min: [...box.min], max: [...box.max] });
 const same = (a: CropBounds, b: CropBounds) => a.min.every((value, axis) => value === b.min[axis] && a.max[axis] === b.max[axis]);
 const setStatus = (message: string) => { get("status").textContent = message; };
+const shownCount = (count?: number) => count === undefined ? "—" : number.format(count);
 
 function refreshControls(): void {
   const blocked = editingBlocked();
   const canEdit = !!bounds && !blocked;
+  const { regions, selected } = regionState;
+  const regionMode = mode === "regions";
   for (const input of [...inputs.min, ...inputs.max]) input.disabled = !canEdit;
   for (const { canvas } of views) canvas.toggleAttribute("data-ready", canEdit);
+  for (const [id, chosen] of [["mode-crop", !regionMode], ["mode-regions", regionMode]] as const) {
+    button(id).disabled = blocked;
+    button(id).setAttribute("aria-pressed", String(chosen));
+  }
+  get("regions-panel").hidden = !regionMode;
+  get("crop-exports").hidden = regionMode;
+  get("partition-exports").hidden = !regionMode;
+  get("selected-region").hidden = selected < 0;
+  get("bounds-title").textContent = regionMode ? "Region bounds" : "Crop bounds";
+  get("inside-legend").textContent = regionMode ? "Within selected bounds" : "Inside";
+  get("outside-legend").textContent = regionMode ? "Other centers" : "Outside";
+  get("bounds-controls").hidden = regionMode && selected < 0;
+  get("drag-guide").hidden = regionMode && selected < 0;
   button("fit-bounds").disabled = !canEdit;
-  button("undo").disabled = !canEdit || undo.length === 0;
-  button("redo").disabled = !canEdit || redo.length === 0;
-  const count = draft || invalidField ? undefined : inside;
+  button("undo").disabled = blocked || (regionMode ? regionUndo : cropUndo).length === 0;
+  button("redo").disabled = blocked || (regionMode ? regionRedo : cropRedo).length === 0;
+
+  const editing = draft !== undefined || invalidField !== undefined;
+  const count = editing ? undefined : inside;
   const outside = asset && count !== undefined ? asset.count - count : undefined;
-  get("inside-count").textContent = count === undefined ? "—" : number.format(count);
-  get("outside-count").textContent = outside === undefined ? "—" : number.format(outside);
+  get("inside-count").textContent = shownCount(count);
+  get("outside-count").textContent = shownCount(outside);
   button("export-inside").disabled = blocked || count === undefined || count === 0;
   button("export-outside").disabled = blocked || outside === undefined || outside === 0;
-  progress.hidden = !blocked;
-  button("cancel-job").hidden = !blocked;
-}
 
-function writeFields(box: CropBounds): void {
-  for (const side of ["min", "max"] as const) {
-    for (const [axis, input] of inputs[side].entries()) writeField(input, box[side][axis]);
+  const next = editing ? undefined : summary;
+  get("overlap-count").textContent = shownCount(next?.overlap);
+  get("remainder-count").textContent = shownCount(next?.remainder);
+  const rows = get("region-list").querySelectorAll<HTMLButtonElement>("button");
+  for (const [index, row] of Array.from(rows).entries()) {
+    row.disabled = blocked;
+    const countNode = row.querySelector("output")!;
+    const count = next?.regions[index];
+    const enabled = regions[index].enabled;
+    countNode.textContent = enabled ? shownCount(count) : "Off";
+    row.setAttribute("aria-description", !enabled ? "Disabled" : count === undefined ? "Count unavailable" : shownCount(count) + " assigned centers");
   }
+  get("no-regions").hidden = regions.length > 0;
+  button("add-region").disabled = !asset || blocked || regions.length >= MAX_REGIONS;
+  nameField.disabled = enabledField.disabled = !canEdit;
+  button("region-earlier").disabled = !canEdit || selected <= 0;
+  button("region-later").disabled = !canEdit || selected >= regions.length - 1;
+  button("remove-region").disabled = !canEdit;
+  button("open-recipe").disabled = !asset || blocked;
+  button("save-recipe").disabled = !asset || blocked || editing;
+  button("export-partition").disabled = blocked || !next;
+  button("recount").hidden = !asset || summary !== undefined || !!job;
+
+  const showProgress = blocked || job?.kind === "count-partition";
+  progress.hidden = !showProgress;
+  button("cancel-job").hidden = !showProgress;
 }
 
-function writeField(input: HTMLInputElement, value: number): void {
-  const exact = String(value);
-  input.title = `${exact} · Middle-drag to adjust`;
-  input.value = exact;
+function syncBounds(): void {
+  bounds = mode === "crop" ? cropBounds : regionState.regions[regionState.selected]?.bounds;
+  draft = undefined;
+  if (bounds) writeFields(bounds);
+  scheduleDraw();
 }
 
-function request(next: Job): void {
+function renderRegions(): void {
+  const { regions, selected } = regionState;
+  const list = get("region-list");
+  while (list.childElementCount > regions.length) list.lastElementChild?.remove();
+  for (const [index, region] of regions.entries()) {
+    let row = list.children[index]?.querySelector("button");
+    if (!row) {
+      const item = document.createElement("li");
+      row = document.createElement("button");
+      row.type = "button";
+      row.append(document.createElement("span"), document.createElement("output"));
+      row.onclick = () => {
+        discardDraft();
+        regionState = { ...regionState, selected: index };
+        syncBounds();
+        renderRegions();
+        refreshControls();
+      };
+      item.append(row);
+      list.append(item);
+    }
+    row.setAttribute("aria-pressed", String(index === selected));
+    row.setAttribute("aria-label", region.name);
+    row.querySelector("span")!.textContent = region.name;
+  }
+  nameField.value = regions[selected]?.name ?? "";
+  enabledField.checked = regions[selected]?.enabled ?? false;
+}
+
+function request(next: CropJob): void {
   job = next;
   progress.value = 0;
   worker.postMessage(next satisfies CropRequest);
@@ -83,25 +165,47 @@ function request(next: Job): void {
 }
 
 function recount(status?: string): void {
-  if (!bounds) return;
-  inside = undefined;
+  if (!asset) return;
   countStatus = status;
-  setStatus(status ?? "Counting splats…");
-  request({ kind: "count", id: ++jobId, bounds });
+  if (mode === "regions") {
+    summary = undefined;
+    setStatus(status ?? "Counting partition ownership…");
+    request({ kind: "count-partition", id: ++jobId, regions: regionState.regions });
+  } else if (cropBounds) {
+    inside = undefined;
+    setStatus(status ?? "Counting splats…");
+    request({ kind: "count", id: ++jobId, bounds: cropBounds });
+  }
 }
 
 function open(file: File): void {
   discardDraft();
-  setStatus(`Reading ${file.name}…`);
+  setStatus("Reading " + file.name + "…");
   request({ kind: "load", id: ++jobId, file });
 }
 
-function applyBounds(next: CropBounds): void {
-  bounds = next;
-  draft = undefined;
-  writeFields(next);
-  recount();
-  scheduleDraw();
+function pushHistory<T>(stack: T[], value: T): void {
+  stack.push(value);
+  if (stack.length > 64) stack.shift();
+}
+
+function setRegions(state: RegionState, status?: string): void {
+  regionState = state;
+  syncBounds();
+  renderRegions();
+  recount(status);
+}
+
+function commitRegions(regions: CaptureRegion[], selected: number, status?: string): void {
+  pushHistory(regionUndo, regionState);
+  regionRedo = [];
+  setRegions({ regions, selected }, status);
+}
+
+function patchRegion(change: Partial<CaptureRegion>): void {
+  const { selected, regions } = regionState;
+  if (selected < 0 || editingBlocked()) return;
+  commitRegions(regions.map((region, index) => index === selected ? { ...region, ...change } : region), selected);
 }
 
 function commitBounds(next: CropBounds): void {
@@ -110,19 +214,32 @@ function commitBounds(next: CropBounds): void {
     discardDraft();
     return;
   }
-  undo.push(bounds);
-  if (undo.length > 64) undo.shift();
-  redo = [];
-  applyBounds(next);
+  if (mode === "regions") {
+    patchRegion({ bounds: next });
+  } else {
+    pushHistory(cropUndo, bounds);
+    cropRedo = [];
+    cropBounds = next;
+    syncBounds();
+    recount();
+  }
 }
 
 function restore(backward: boolean): void {
-  if (!bounds || editingBlocked()) return;
+  if (!asset || editingBlocked()) return;
   discardDraft();
-  const next = (backward ? undo : redo).pop();
-  if (next) {
-    (backward ? redo : undo).push(bounds);
-    applyBounds(next);
+  if (mode === "regions") {
+    const next = (backward ? regionUndo : regionRedo).pop();
+    if (!next) return;
+    pushHistory(backward ? regionRedo : regionUndo, regionState);
+    setRegions(next);
+  } else if (cropBounds) {
+    const next = (backward ? cropUndo : cropRedo).pop();
+    if (!next) return;
+    pushHistory(backward ? cropRedo : cropUndo, cropBounds);
+    cropBounds = next;
+    syncBounds();
+    recount();
   }
 }
 
@@ -144,6 +261,23 @@ function preview(next: CropBounds): void {
   draft = next;
   refreshControls();
   scheduleDraw();
+}
+
+function closeBoundMenu(): void {
+  if (boundMenu.matches(":popover-open")) boundMenu.hidePopover();
+}
+
+
+function writeFields(box: CropBounds): void {
+  for (const side of ["min", "max"] as const) {
+    for (const [axis, input] of inputs[side].entries()) writeField(input, box[side][axis]);
+  }
+}
+
+function writeField(input: HTMLInputElement, value: number): void {
+  const exact = String(value);
+  input.title = exact + (lockedBounds.has(input) ? " · Middle-drag locked" : " · Middle-drag to adjust");
+  input.value = exact;
 }
 
 function drawView(view: View): void {
@@ -170,7 +304,7 @@ function drawView(view: View): void {
   }
   ctx.stroke();
   const selection = draft ?? bounds;
-  if (!asset || !selection) return;
+  if (!asset) return;
 
   const { sample, bounds: extent } = asset;
   const pad = plotInset(width, height);
@@ -179,19 +313,28 @@ function drawView(view: View): void {
   for (const kept of [false, true]) {
     ctx.fillStyle = color(kept ? "--dot-in" : "--dot-out");
     for (let i = 0; i < sample.length; i += 3) {
-      if (containsCenter(sample, i, selection) === kept) {
+      if ((selection !== undefined && containsCenter(sample, i, selection)) === kept) {
         ctx.fillRect(x(sample[i + horizontal]) - 0.8, y(sample[i + vertical]) - 0.8, 1.6, 1.6);
       }
     }
   }
-  const left = x(selection.min[horizontal]);
-  const top = y(selection.max[vertical]);
-  const right = x(selection.max[horizontal]);
-  const bottom = y(selection.min[vertical]);
+  const outline = (box: CropBounds) => {
+    const left = x(box.min[horizontal]);
+    const top = y(box.max[vertical]);
+    ctx.strokeRect(left, top, x(box.max[horizontal]) - left, y(box.min[vertical]) - top);
+  };
+  if (mode === "regions") {
+    ctx.strokeStyle = color("--dot-out");
+    ctx.globalAlpha = 0.55;
+    for (const [index, region] of regionState.regions.entries()) {
+      if (index !== regionState.selected && region.enabled) outline(region.bounds);
+    }
+  }
+  if (!selection) return;
   ctx.strokeStyle = color("--focus");
   ctx.globalAlpha = 0.8;
   ctx.setLineDash([5, 4]);
-  ctx.strokeRect(left, top, right - left, bottom - top);
+  outline(selection);
 }
 
 const plotInset = (width: number, height: number) => Math.min(18, width / 5, height / 5);
@@ -325,12 +468,12 @@ for (const side of ["min", "max"] as const) {
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
-        input.removeAttribute("aria-invalid");
-        discardDraft();
+        if (cancelGesture || editedField === input) discardDraft();
+        else cancelWork();
       }
     });
     input.addEventListener("pointerdown", event => {
-      if (event.button !== 1 || !asset || !bounds || editingBlocked() || cancelGesture) return;
+      if (event.button !== 1 || !asset || !bounds || editingBlocked() || cancelGesture || lockedBounds.has(input)) return;
       event.preventDefault();
       discardDraft();
       const initialBounds = bounds;
@@ -356,24 +499,67 @@ for (const side of ["min", "max"] as const) {
         if (draft) commitBounds(draft);
       });
     });
+    input.addEventListener("contextmenu", event => {
+      event.preventDefault();
+      closeBoundMenu();
+      get("bound-menu-action").textContent = lockedBounds.has(input) ? "Unlock middle-drag" : "Lock middle-drag";
+      lockedField = input;
+      boundMenu.style.left = Math.min(event.clientX, window.innerWidth - 156) + "px";
+      boundMenu.style.top = Math.min(event.clientY, window.innerHeight - 44) + "px";
+      boundMenu.showPopover();
+      button("bound-menu-action").focus({ preventScroll: true });
+    });
     input.addEventListener("auxclick", event => {
       if (event.button === 1) event.preventDefault();
     });
   }
 }
 
+function addRegion(): void {
+  if (!asset || editingBlocked() || regionState.regions.length >= MAX_REGIONS) return;
+  const { regions } = regionState;
+  const names = new Set(regions.map(region => region.name.toLowerCase()));
+  let suffix = 1;
+  while (names.has("region " + suffix)) suffix++;
+  commitRegions([...regions, { name: "Region " + suffix, enabled: true, bounds: copy(cropBounds ?? asset.bounds) }], regions.length);
+}
+
+function moveRegion(offset: number): void {
+  const { regions, selected } = regionState;
+  const target = selected + offset;
+  if (selected < 0 || target < 0 || target >= regions.length || editingBlocked()) return;
+  const moved = [...regions];
+  [moved[target], moved[selected]] = [moved[selected], moved[target]];
+  commitRegions(moved, target);
+}
+
+function selectMode(next: typeof mode): void {
+  if (next === mode || editingBlocked()) return;
+  discardDraft();
+  mode = next;
+  syncBounds();
+  if (isCount()) {
+    worker.postMessage({ kind: "cancel" } satisfies CropRequest);
+    job = undefined;
+  }
+  if (next === "regions" ? !summary : inside === undefined) recount();
+  else setStatus(next === "regions" ? "Partition ready." : "Crop ready.");
+  refreshControls();
+}
+
 function exportSide(side: CropSide): void {
-  if (!bounds || editingBlocked() || draft || invalidField || inside === undefined) return;
-  setStatus(`Preparing ${side} region…`);
-  request({ kind: "export", id: ++jobId, bounds, side });
+  if (!cropBounds || editingBlocked() || draft || invalidField || inside === undefined) return;
+  setStatus("Preparing " + side + " region…");
+  request({ kind: "export", id: ++jobId, bounds: cropBounds, side });
 }
 
 function cancelWork(): void {
-  if (!editingBlocked()) return;
+  if (!job || job.kind === "count") return;
   worker.postMessage({ kind: "cancel" } satisfies CropRequest);
+  const previous = job;
   job = undefined;
   const message = "Operation canceled.";
-  if (asset && inside === undefined) recount(message);
+  if (previous.kind === "load" && asset && (mode === "regions" ? !summary : inside === undefined)) recount(message);
   else setStatus(message);
   refreshControls();
 }
@@ -383,13 +569,13 @@ function releaseDownload(): void {
   downloadUrl = undefined;
 }
 
-function download(file: Blob, side: CropSide): void {
+function download(file: Blob, suffix: string): void {
   clearTimeout(downloadTimer);
   releaseDownload();
   downloadUrl = URL.createObjectURL(file);
   const anchor = document.createElement("a");
   anchor.href = downloadUrl;
-  anchor.download = `${name.replace(/\.ply$/i, "") || "capture"}-${side}.ply`;
+  anchor.download = (name.replace(/\.ply$/i, "") || "capture") + suffix;
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
@@ -408,26 +594,41 @@ worker.onmessage = ({ data }: MessageEvent<CropReply>) => {
     worker.postMessage({ kind: "accept", id: data.id } satisfies CropRequest);
     asset = data;
     name = previousJob.file.name;
-    bounds = data.bounds;
+    cropBounds = data.bounds;
     inside = data.count;
-    undo = [];
-    redo = [];
-    writeFields(bounds);
+    cropUndo = [];
+    cropRedo = [];
+    regionState = { regions: [], selected: -1 };
+    regionUndo = [];
+    regionRedo = [];
+    summary = { regions: [], overlap: 0, remainder: data.count };
+    syncBounds();
+    renderRegions();
     get("asset-name").textContent = name;
-    get("asset-meta").textContent = `${number.format(data.count)} splats`;
+    get("asset-meta").textContent = number.format(data.count) + " splats";
     const points = data.sample.length / 3;
-    get("sample-label").textContent = points < data.count ? `${number.format(points)} sampled centers` : "";
-    setStatus("Drag in a projection or edit the bounds.");
-    scheduleDraw();
+    get("sample-label").textContent = points < data.count ? number.format(points) + " sampled centers" : "";
+    setStatus(mode === "regions" ? "Add a region or open a recipe for this capture." : "Drag in a projection or edit the bounds.");
   } else if (data.kind === "counted") {
     inside = data.inside;
-    setStatus(countStatus ?? (data.inside === 0 ? "No centers fall inside these bounds." : "Crop ready."));
-    countStatus = undefined;
+    setStatus(countStatus ?? (inside === 0 ? "No centers fall inside these bounds." : "Crop ready."));
+  } else if (data.kind === "counted-partition") {
+    summary = data.summary;
+    setStatus(countStatus ?? "Partition ready.");
   } else if (data.kind === "exported") {
-    download(data.file, data.side);
-    setStatus(`Download started for the ${data.side} region.`);
+    download(data.file, "-" + data.side + ".ply");
+    setStatus("Download started for the " + data.side + " region.");
+  } else if (data.kind === "exported-partition") {
+    download(data.file, "-regions.zip");
+    setStatus("Partition download started.");
+  } else if (data.kind === "saved-recipe") {
+    download(new Blob([JSON.stringify(data.recipe, null, 2)], { type: "application/json" }), "-regions.json");
+    setStatus("Recipe download started.");
+  } else if (data.kind === "opened-recipe") {
+    const { regions } = data.recipe;
+    commitRegions(regions, regions.length ? 0 : -1, "Regions recipe opened.");
   } else if (data.kind === "failed") {
-    if (previousJob.kind === "load" && asset && inside === undefined) recount(data.message);
+    if (previousJob.kind === "load" && asset && (mode === "regions" ? !summary : inside === undefined)) recount(data.message);
     else setStatus(data.message);
   }
   refreshControls();
@@ -436,8 +637,9 @@ worker.onmessage = ({ data }: MessageEvent<CropReply>) => {
 worker.onerror = () => {
   job = undefined;
   asset = undefined;
-  bounds = undefined;
+  cropBounds = bounds = undefined;
   inside = undefined;
+  summary = undefined;
   setStatus("The crop worker stopped. Reload this page to reopen a capture.");
   refreshControls();
   scheduleDraw();
@@ -450,20 +652,82 @@ source.onchange = () => {
   if (file) open(file);
 };
 button("open-example").onclick = () => open(createCropExample());
+button("mode-crop").onclick = () => selectMode("crop");
+button("mode-regions").onclick = () => selectMode("regions");
 button("fit-bounds").onclick = () => { if (asset) commitBounds(asset.bounds); };
 button("undo").onclick = () => restore(true);
 button("redo").onclick = () => restore(false);
 button("export-inside").onclick = () => exportSide("inside");
 button("export-outside").onclick = () => exportSide("outside");
+button("add-region").onclick = addRegion;
+enabledField.onchange = () => patchRegion({ enabled: enabledField.checked });
+button("region-earlier").onclick = () => moveRegion(-1);
+button("region-later").onclick = () => moveRegion(1);
+button("remove-region").onclick = () => {
+  const { regions, selected } = regionState;
+  commitRegions(regions.filter((_, index) => index !== selected), Math.min(selected, regions.length - 2));
+};
+nameField.onblur = () => {
+  const { regions, selected } = regionState;
+  const region = regions[selected];
+  if (!region || nameField.value === region.name) return;
+  const candidate = nameField.value;
+  try {
+    checkRegionName(candidate, regions.filter((_, index) => index !== selected).map(entry => entry.name));
+    patchRegion({ name: candidate });
+  } catch (error) {
+    nameField.value = region.name;
+    setStatus(error instanceof Error ? error.message : String(error));
+  }
+};
+nameField.onkeydown = event => {
+  if (event.key === "Enter") nameField.blur();
+  if (event.key !== "Escape") return;
+  event.preventDefault();
+  event.stopPropagation();
+  const original = regionState.regions[regionState.selected]?.name ?? "";
+  if (nameField.value === original) cancelWork();
+  else nameField.value = original;
+};
+button("open-recipe").onclick = () => recipeFile.click();
+recipeFile.onchange = () => {
+  const file = recipeFile.files?.[0];
+  recipeFile.value = "";
+  if (!file || !asset || editingBlocked()) return;
+  discardDraft();
+  setStatus("Checking recipe against this capture…");
+  request({ kind: "open-recipe", id: ++jobId, file });
+};
+button("save-recipe").onclick = () => {
+  if (!asset || editingBlocked() || draft || invalidField) return;
+  setStatus("Preparing regions recipe…");
+  request({ kind: "save-recipe", id: ++jobId, regions: regionState.regions });
+};
+button("export-partition").onclick = () => {
+  if (!summary || editingBlocked() || draft || invalidField) return;
+  setStatus("Preparing partition package…");
+  request({ kind: "export-partition", id: ++jobId, regions: regionState.regions });
+};
+button("recount").onclick = () => recount();
 button("cancel-job").onclick = cancelWork;
+button("bound-menu-action").onclick = () => {
+  const input = lockedField;
+  if (!input) return;
+  if (lockedBounds.has(input)) lockedBounds.delete(input);
+  else lockedBounds.add(input);
+  if (bounds) writeFields(bounds);
+  closeBoundMenu();
+  input.focus();
+};
 window.addEventListener("keydown", event => {
   if (event.key === "Escape") {
-    if (cancelGesture) cancelGesture();
+    if (boundMenu.matches(":popover-open")) closeBoundMenu();
+    else if (cancelGesture) cancelGesture();
     else cancelWork();
   }
   if (event.target instanceof HTMLInputElement || !event.ctrlKey && !event.metaKey) return;
   const key = event.key.toLowerCase();
-  if ((key === "z" || key === "y") && bounds && !editingBlocked()) {
+  if ((key === "z" || key === "y") && asset && !editingBlocked()) {
     event.preventDefault();
     restore(key === "z" && !event.shiftKey);
   }
@@ -472,4 +736,5 @@ window.addEventListener("pagehide", releaseDownload);
 theme.addEventListener("change", scheduleDraw);
 const resize = new ResizeObserver(scheduleDraw);
 for (const { canvas } of views) resize.observe(canvas);
+refreshControls();
 scheduleDraw();
