@@ -4,21 +4,22 @@ import { propertyInteraction } from "./property-interaction.ts";
 import { createAnimationLayerFlattenPanel } from "./animation-layer-flatten-panel.ts";
 import type { SceneStore } from "./scene-store.ts";
 
-function hasWeightKeyAtFrame(keys: readonly CurveKey[], frame: number): boolean {
+const WEIGHT_KEY_RANGE_SIZE = 128;
+
+function firstWeightKeyAtOrAfter(keys: readonly CurveKey[], frame: number): number {
   let low = 0, high = keys.length;
   while (low < high) {
     const index = (low + high) >>> 1;
-    const time = keys[index].time;
-    if (time === frame) return true;
-    if (time < frame) low = index + 1;
+    if (keys[index].time < frame) low = index + 1;
     else high = index;
   }
-  return false;
+  return low;
 }
 
 export function createAnimationLayersPanel(store: SceneStore, options: { available(): boolean; getFrame?(): number; onActiveChange(): void; onStatus?(message: string): void }) {
   const element = document.createElement("section"); element.className = "animation-layers-panel"; element.setAttribute("aria-label", "Animation layers");
   const style = document.createElement("style"); style.textContent = `.animation-layers-panel{height:100%;overflow:auto;box-sizing:border-box;padding:12px;color:var(--text);background:var(--panel);font-size:12px}.animation-layers-panel label{display:grid;gap:5px;margin:10px 0}.animation-layers-panel p{line-height:1.5;color:var(--muted)}.animation-layers-panel input,.animation-layers-panel select,.animation-layers-panel button{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:3px;padding:6px;min-width:0;box-sizing:border-box}.animation-layers-panel select,.animation-layers-panel input:not([type=checkbox]){width:100%}.animation-layers-panel button{cursor:pointer;margin:0 5px 6px 0}.animation-layers-panel .layer-check{display:flex;align-items:center;gap:7px}.animation-layers-panel :disabled{opacity:.45}.animation-layers-panel input[type=number]{text-align:right}.animation-layers-panel .weight-actions{display:flex;flex-wrap:wrap;gap:4px}.animation-layers-panel .weight-actions button{margin:0}.animation-layers-panel details{border-top:1px solid var(--line);margin-top:10px;padding-top:8px}.animation-layers-panel summary{cursor:pointer}.animation-layers-panel .weight-key-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}.animation-layers-panel .weight-key-fields label{min-width:0}.animation-layers-panel [data-error=true]{color:#ce756a}`;
+  style.textContent += ".animation-layers-panel .weight-actions button[aria-disabled=true]{opacity:.45;cursor:default}";
   function input(label: string, type = "text") { const node = document.createElement("input"); node.type = type; node.setAttribute("aria-label", label); return node; }
   function select(label: string, values: [string,string][]) { const node = document.createElement("select"); node.setAttribute("aria-label", label); values.forEach(([text,value]) => node.add(new Option(text,value))); return node; }
   function label(text: string, control: HTMLElement) { const node = document.createElement("label"); node.append(text,control); return node; }
@@ -39,14 +40,41 @@ export function createAnimationLayersPanel(store: SceneStore, options: { availab
   // Keep native disclosure activation from also toggling viewport playback.
   keyHeading.addEventListener("keydown",event=>{if(event.key===" "||event.key==="Enter")event.stopPropagation();});
   const keyList=select("Layer weight keys",[]);keyList.size=4;
+  const keyNavigation=document.createElement("div");
+  keyNavigation.setAttribute("role","group");
+  keyNavigation.setAttribute("aria-label","Weight key navigation");
+  keyNavigation.hidden=true;
+  const rangeStatus=document.createElement("p");
+  rangeStatus.setAttribute("role","status");
+  const jumpFrame=input("Find key by frame","number");
+  jumpFrame.step="any";jumpFrame.min="-1000000";jumpFrame.max="1000000";jumpFrame.required=true;
+  jumpFrame.title="Select the first key at or after the frame, or the last key at the end of the track.";
+  const rangeActions=document.createElement("div");rangeActions.className="weight-actions";
+  const previousRange=button("Previous range",()=>selectKeyAt(listedStart-1));
+  const nextRange=button("Next range",()=>selectKeyAt(listedStart+WEIGHT_KEY_RANGE_SIZE));
+  const jump=button("Find key",jumpToFrame);
+  rangeActions.append(previousRange,nextRange);
+  keyNavigation.append(rangeStatus,rangeActions,label("Find key by frame",jumpFrame),jump);
+  for(const control of [previousRange,nextRange,jump]){
+    control.addEventListener("keydown",event=>{if(event.key===" "||event.key==="Enter")event.stopPropagation();});
+  }
   const selectedFrame=input("Selected weight key frame","number");selectedFrame.min="-1000000";selectedFrame.max="1000000";selectedFrame.step="0.01";
   const selectedValue=input("Selected weight key value","number");selectedValue.min="0";selectedValue.max="1";selectedValue.step="0.01";
   const selectedInterpolation=select("Selected weight key interpolation",[["Step","step"],["Linear","linear"],["Bezier","bezier"]]);
   const keyFields=document.createElement("div");keyFields.className="weight-key-fields";keyFields.append(label("Frame",selectedFrame),label("Value",selectedValue));
   let selectedKeyId="",keyOwnerId="";
-  let observedTrack:LayerWeightTrack|undefined,listedTrack:LayerWeightTrack|undefined,listedOwner="";
+  let observedTrack:LayerWeightTrack|undefined,listedTrack:LayerWeightTrack|undefined,listedOwner="",listedStart=-1;
   const keyIndexById = new Map<string, number>();
-  let listedSelection: string | undefined;
+  let listedSelection: string | undefined, listedAvailable: boolean | undefined;
+  function selectKeyAt(index:number){
+    const key=observedTrack?.keys[index];
+    if(key)selectedKeyId=key.id;
+  }
+  function jumpToFrame(){
+    if(!jumpFrame.reportValidity()||!observedTrack)return;
+    const keys=observedTrack.keys;
+    selectKeyAt(Math.min(firstWeightKeyAtOrAfter(keys,jumpFrame.valueAsNumber),keys.length-1));
+  }
   const selectedKey=()=>store.getState().document.animation?.layers?.find(layer=>layer.id===active.value)?.weightTrack?.keys.find(key=>key.id===selectedKeyId);
   function editSelectedKey(patch:Partial<CurveKey>){
     const layer=store.getState().document.animation?.layers?.find(layer=>layer.id===active.value),track=layer?.weightTrack;
@@ -94,11 +122,40 @@ export function createAnimationLayersPanel(store: SceneStore, options: { availab
   const removeSelected=button("Remove selected weight key",()=>{const key=selectedKey();if(key)deleteLayerWeightKey(store,active.value,key.time);});
   keyDetails.ontoggle=()=>refresh();
   keyList.onchange=()=>{selectedKeyId=listedSelection=keyList.value;refresh();};
+  keyList.addEventListener("keydown",event=>{
+    const keys=observedTrack?.keys;
+    if(!keys||keys.length<=WEIGHT_KEY_RANGE_SIZE||event.defaultPrevented||keyList.disabled)return;
+    const index=keyIndexById.get(selectedKeyId)??0;
+    let target:number;
+    if(event.ctrlKey&&event.altKey&&!event.metaKey&&!event.shiftKey&&(event.key===","||event.key===".")){
+      target=index+(event.key===","?-1:1);
+    }else{
+      if(event.ctrlKey||event.altKey||event.metaKey||event.shiftKey)return;
+      if(event.key==="Home")target=0;
+      else if(event.key==="End")target=keys.length-1;
+      else if(event.key==="ArrowUp"&&index===listedStart)target=index-1;
+      else if(event.key==="ArrowDown"&&index===listedStart+WEIGHT_KEY_RANGE_SIZE-1)target=index+1;
+      else return;
+    }
+    event.preventDefault();event.stopPropagation();
+    selectKeyAt(target);
+    refresh();
+  });
+  jumpFrame.addEventListener("keydown",event=>{
+    if(event.key==="Enter"){
+      event.preventDefault();
+      run(jumpToFrame);
+    }else if(event.key==="Escape"){
+      event.preventDefault();
+      jumpFrame.value="";
+      jumpFrame.blur();
+    }
+  });
   selectedFrame.onchange=()=>{if(!cancelField&&!selectedFrame.readOnly)run(()=>editSelectedKey({time:selectedFrame.valueAsNumber}));};
   selectedValue.onchange=()=>{if(!cancelField&&!selectedValue.readOnly)run(()=>editSelectedKey({value:selectedValue.valueAsNumber}));};
   selectedInterpolation.onchange=()=>run(()=>editSelectedKey({interpolation:selectedInterpolation.value as CurveKey["interpolation"]}));
   const keyHelp=document.createElement("p");keyHelp.textContent="Select a weight key to edit its exact frame, value and outgoing interpolation. Middle-drag previews the numeric field; release commits once. Escape cancels. Right-click a numeric field to Lock or Unlock it.";
-  keyDetails.append(keyHeading,label("Keys",keyList),keyFields,label("Interpolation",selectedInterpolation),tangentDetails,removeSelected,keyHelp);
+  keyDetails.append(keyHeading,keyNavigation,label("Keys",keyList),keyFields,label("Interpolation",selectedInterpolation),tangentDetails,removeSelected,keyHelp);
   const checks = (["Mute", "Solo", "Locked"] as const).map(text => {const node=input(`Animation layer ${text.toLowerCase()}`,"checkbox");const row=label(text,node);row.className="layer-check";return {text,node,row};});
   const status=document.createElement("p");status.setAttribute("role","status");
   const summary=document.createElement("p");
@@ -140,26 +197,49 @@ export function createAnimationLayersPanel(store: SceneStore, options: { availab
     const available=options.available();active.disabled=add.disabled=!available;
     [name,mode,weight,...checks.map(check=>check.node)].forEach(node=>node.disabled=!available||!layer);
     weight.disabled=keyValue.disabled=setWeightKey.disabled=!available||!layer||layer.locked===true;
-    const track=layer?.weightTrack,keys=track?.keys??[];
-    deleteWeightKey.disabled=!available||!layer||layer.locked||!hasWeightKeyAtFrame(keys,Math.round(current));
+    const track=layer?.weightTrack,keys=track?.keys??[],roundedFrame=Math.round(current);
+    deleteWeightKey.disabled=!available||!layer||layer.locked||keys[firstWeightKeyAtOrAfter(keys,roundedFrame)]?.time!==roundedFrame;
     clearWeight.disabled=!available||!layer||layer.locked||!keys.length;
     if(keyOwnerId!==id||observedTrack!==track){
-      if(keyOwnerId!==id)selectedKeyId="";
+      if(keyOwnerId!==id){
+        selectedKeyId="";
+        jumpFrame.value="";
+      }
       keyOwnerId=id;observedTrack=track;
       keyIndexById.clear();
       keys.forEach((key,index)=>keyIndexById.set(key.id,index));
       if(!keyIndexById.has(selectedKeyId))selectedKeyId=keys[0]?.id??"";
     }
-    // Build the native list only when disclosed and its immutable source changes.
-    if(keyDetails.open&&(listedTrack!==track||listedOwner!==id)){
-      const choices=document.createDocumentFragment();
-      keys.forEach(key=>choices.append(new Option(`Frame ${key.time} · ${key.value} · ${key.interpolation}`,key.id)));
-      keyList.replaceChildren(choices);listedTrack=track;listedOwner=id;
-      listedSelection=undefined;
-    }
-    // Assigning the native select's value searches its options, even if it already matches.
-    if(listedSelection!==selectedKeyId){keyList.value=selectedKeyId;listedSelection=selectedKeyId;}
     const selectedIndex=keyIndexById.get(selectedKeyId)??-1,key=keys[selectedIndex];
+    // Follow the selected ID across revisions while limiting each native list to one range.
+    if(keyDetails.open){
+      const start=Math.floor(Math.max(0,selectedIndex)/WEIGHT_KEY_RANGE_SIZE)*WEIGHT_KEY_RANGE_SIZE;
+      const end=Math.min(start+WEIGHT_KEY_RANGE_SIZE,keys.length);
+      const dense=keys.length>WEIGHT_KEY_RANGE_SIZE;
+      const listChanged=listedTrack!==track||listedOwner!==id||listedStart!==start;
+      if(listChanged){
+        const choices=document.createDocumentFragment();
+        for(let index=start;index<end;index++){
+          const entry=keys[index];
+          choices.append(new Option(`Frame ${entry.time} · ${entry.value} · ${entry.interpolation}`,entry.id));
+        }
+        keyList.replaceChildren(choices);
+        listedTrack=track;listedOwner=id;listedStart=start;listedSelection=undefined;
+        keyNavigation.hidden=!dense;
+        if(dense){
+          const range=`Frames ${keys[start].time} to ${keys[end-1].time} · Keys ${start+1}–${end} of ${keys.length}`;
+          if(rangeStatus.textContent!==range)rangeStatus.textContent=range;
+        }
+      }
+      if(listedSelection!==selectedKeyId){keyList.value=selectedKeyId;listedSelection=selectedKeyId;}
+      if(dense&&(listChanged||listedAvailable!==available)){
+        // aria-disabled retains focus at either endpoint; run() and selectKeyAt() guard activation.
+        previousRange.setAttribute("aria-disabled",String(!available||start===0));
+        nextRange.setAttribute("aria-disabled",String(!available||end===keys.length));
+        jumpFrame.disabled=jump.disabled=!available;
+        listedAvailable=available;
+      }
+    }
     if(document.activeElement!==selectedFrame)selectedFrame.value=key?String(key.time):"";
     if(document.activeElement!==selectedValue)selectedValue.value=key?String(key.value):"";
     selectedInterpolation.value=key?.interpolation??"linear";
