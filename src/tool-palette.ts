@@ -24,12 +24,12 @@ export function mountToolPalette(ids = { panel: "tool-palette", handle: "palette
   lock.addEventListener("click", () => {
     stop();
     locked = !locked;
-    lock.setAttribute("aria-pressed", String(locked));
-    lock.setAttribute(
-      "aria-label",
-      locked ? `Unlock ${label}` : `Lock ${label}`,
-    );
-    lock.title=locked ? `Unlock ${label}` : `Lock ${label}`;
+    const action = locked ? `Unlock ${label}` : `Lock ${label}`;
+    if (lock.hasAttribute("aria-pressed")) {
+      lock.setAttribute("aria-pressed", String(locked));
+    }
+    lock.setAttribute("aria-label", action);
+    lock.title = action;
     handle.setAttribute("aria-disabled", String(locked));
     handle.title = locked
       ? `Unlock to move ${label}`
