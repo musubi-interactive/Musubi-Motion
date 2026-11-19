@@ -229,6 +229,22 @@ export function addSplatExtraction(doc: SceneDocument, identity: SplatSelectionI
       data: encodeMaskData(ids.length, fallback, values), componentLocks: remapRanges(mask.componentLocks),
     };
   });
+  if (source.deformers?.length) {
+    shape.deformers = source.deformers.flatMap(node => {
+      const weights = node.weights?.flatMap(entry => {
+        const index = subset.get(entry.index);
+        return index === undefined ? [] : [{ ...entry, index }];
+      });
+      // An omitted membership list affects every original; an empty intersection affects none.
+      if (weights && !weights.length) return [];
+      const copy = structuredClone(node);
+      copy.id = crypto.randomUUID();
+      copy.sourceCount = ids.length;
+      if (weights) copy.weights = weights;
+      if (node.maskId) copy.maskId = maskIds.get(node.maskId);
+      return [copy];
+    });
+  }
   if (source.appearance) shape.appearance = {
     version: 1, sourceCount: ids.length,
     layers: source.appearance.layers.map(layer => ({

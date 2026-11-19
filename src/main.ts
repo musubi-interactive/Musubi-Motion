@@ -1159,7 +1159,7 @@ async function start() {
       if (meshComponentRequest && !modelingPanel?.element.checkVisibility()) modelingPanel?.stopEditing();
       controls.enabled = event.pointerType === "touch" || event.altKey;
       transform.enabled =
-        (!splatComponent || transform.object === splatComponentProxy) && !componentPickShape && !paintSettings && (!meshComponentRequest || transform.object === meshComponentProxy) &&
+        (!splatComponent || transform.object === splatComponentProxy || transform.object === deformerProxy) && !componentPickShape && !paintSettings && (!meshComponentRequest || transform.object === meshComponentProxy) &&
         gizmosVisible && (!skeleton.selectedId || jointsVisible) &&
         !event.altKey &&
         (selectedIKId ? jointsVisible && currentMode === "translate" : (selected.size === 1 || !!skeleton.selectedId) && currentMode !== "select") &&
@@ -1246,11 +1246,48 @@ async function start() {
   function singleId() {
     return selected.size === 1 ? selected.values().next().value : undefined;
   }
+  // Keep the proxy in the same object-local space as the authored rest handles.
+  const deformerProxy = new THREE.Object3D();
+  function currentDeformerHandle() {
+    const selection = deformerPanel?.selectedHandle();
+    if (!selection || !deformerPanel) return;
+    const doc = store.getState().document;
+    const shape = doc.nodes[selection.shapeId];
+    if (shape?.type !== "splatShape") return;
+    const node = shape.deformers?.find(entry => entry.id === selection.id);
+    const object = runtime.get(shape.parentId);
+    if (!node || object?.kind !== "splat") return;
+    const adapter = getSplatDeformerDefinition(node.kind)?.handle;
+    const params = deformerPanel.paramsForHandle(shape.id, node.id);
+    if (!adapter || !params || selection.index < 0 || selection.index >= adapter.count(params)) return;
+    return { ...selection, doc, node, object, adapter, params };
+  }
+  let handleDrag: ReturnType<typeof currentDeformerHandle>;
+  function draggedHandleParams(session: NonNullable<typeof handleDrag>) {
+    if (store.getState().document !== session.doc) throw Error("The scene changed during the deformer edit.");
+    return session.adapter.set(session.params, session.index, {
+      position: deformerProxy.position.clone(), rotation: deformerProxy.quaternion.clone(), scale: deformerProxy.scale.clone(),
+    });
+  }
   function refreshGizmo() {
     if (meshTopologyPreview) { transform.detach(); transform.enabled = false; transform.getHelper().visible = false; return; }
     if (splatMaskPaintTool?.active || splatPaintTool?.active) { transform.detach(); transform.enabled = false; transform.getHelper().visible = false; return; }
     orientationControl.disabled = !!dragId || loading || playing || !!meshComponentRequest || !!skeleton.selectedIds.size || !!selectedIKId || !singleId();
     if (meshDrag || objectDrag || splatDrag) return;
+    if (handleDrag) return;
+    const handle = currentDeformerHandle();
+    if (handle && !playing && !loading && gizmosVisible) {
+      const pose = handle.adapter.get(handle.params, handle.index);
+      if (currentMode !== "select") {
+        if (deformerProxy.parent !== handle.object.mesh) handle.object.mesh.add(deformerProxy);
+        deformerProxy.position.copy(pose.position); deformerProxy.quaternion.copy(pose.rotation); deformerProxy.scale.copy(pose.scale);
+        deformerProxy.updateWorldMatrix(true, false);
+        transform.setSpace(objectOrientation === "object" ? "local" : "world"); transform.setMode(currentMode);
+        if (transform.object !== deformerProxy) transform.attach(deformerProxy);
+        transform.enabled = true; transform.getHelper().visible = true; return;
+      }
+      transform.detach(); transform.enabled = false; return;
+    }
     if (splatComponent) {
       const context = splatContext();
       if (context && currentMode !== "select" && splatComponentIds.length && !loading && !playing && gizmosVisible) {
@@ -2127,6 +2164,13 @@ async function start() {
     controls.enabled = !event.value;
     if (event.value) {
       orientationControl.disabled = true;
+      if (transform.object === deformerProxy) {
+        handleDrag = currentDeformerHandle();
+        if (!handleDrag) { transform.pointerUp(null); refreshGizmo(); return; }
+        dragId = "deformer:" + handleDrag.id;
+        cancelDrag = false;
+        setPlaying(false); updateHistoryButtons(); return;
+      }
       if (splatComponent && transform.object === splatComponentProxy) {
         try { splatDrag = beginSplatTransform(currentMode === "select" ? "translate" : currentMode, true); dragId = `splats:${splatComponent.shapeId}`; }
         catch (error) { notice.textContent = (error as Error).message; transform.pointerUp(null); refreshGizmo(); return; }
@@ -2154,6 +2198,15 @@ async function start() {
       setPlaying(false);
     } else if (dragId) {
       const id = dragId;
+      if (handleDrag) {
+        const session = handleDrag;
+        handleDrag = undefined; dragId = undefined;
+        try {
+          if (cancelDrag) deformerPanel?.cancelPreview();
+          else deformerPanel?.commitParams(session.shapeId, session.id, draggedHandleParams(session), "Transform deformer handle");
+        } catch (error) { deformerPanel?.cancelPreview(); notice.textContent = (error as Error).message; }
+        refreshGizmo(); updateHistoryButtons(); return;
+      }
       if (splatDrag) {
         const session = splatDrag;
         splatComponentProxy.updateMatrixWorld(true);
@@ -2233,6 +2286,13 @@ async function start() {
     updateHistoryButtons();
   });
   transform.addEventListener("objectChange", () => {
+    if (handleDrag) {
+      if (!cancelDrag) {
+        try { deformerPanel?.previewParams(handleDrag.shapeId, handleDrag.id, draggedHandleParams(handleDrag)); }
+        catch (error) { notice.textContent = (error as Error).message; abortDrag(); }
+      }
+      return;
+    }
     if (splatDrag) {
       if (cancelDrag) return;
       try { splatComponentProxy.updateMatrixWorld(true); previewSplatTransform(splatDrag, splatComponentProxy.matrixWorld.clone().multiply(splatDrag.startInverse)); }
