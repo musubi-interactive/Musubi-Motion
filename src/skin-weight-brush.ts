@@ -13,11 +13,12 @@ export type SkinBrushOptions = {
   radius: number;
   strength: number;
   value: number;
-  mode: "replace" | "add" | "subtract";
+  mode: "replace" | "add" | "subtract" | "smooth";
+  smooth?: (index: number, amount: number) => SkinBrushValue | undefined;
   getWeight: (index: number) => number;
   limit?: number;
 };
-export type SkinBrushValue = { index: number; weight: number };
+export type SkinBrushValue = { index: number; weight: number; row?: import("./skin-weights.ts").SkinInfluence[] };
 export type SkinBrushStroke = {
   addSegment(start: ComponentPickPoint, end: ComponentPickPoint): void;
   values(): SkinBrushValue[];
@@ -95,9 +96,9 @@ export function createSkinBrushStroke(index: SkinBrushIndex, options: SkinBrushO
   const { radius, strength, value, mode, getWeight } = options, limit = options.limit ?? MAX_AFFECTED;
   if (!Number.isFinite(radius) || radius < 1 || radius > 256) throw Error("Brush radius must be between 1 and 256 pixels.");
   if (![strength, value].every(number => Number.isFinite(number) && number >= 0 && number <= 1)) throw Error("Brush strength and value must be between zero and one.");
-  if (!["replace", "add", "subtract"].includes(mode) || typeof getWeight !== "function") throw Error("Choose a valid brush mode and weight reader.");
+  if (!["replace", "add", "subtract", "smooth"].includes(mode) || typeof getWeight !== "function") throw Error("Choose a valid brush mode and weight reader.");
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_AFFECTED) throw Error("A brush stroke supports at most 20,000 components.");
-  const affected = new Map<number, { base: number; coverage: number }>();
+  const affected = new Map<number, { base: number; coverage: number; smooth?: SkinBrushValue }>();
   const line = new Line3(), point = new Vector3(), closest = new Vector3();
   let failure: Error | undefined;
   function check() { if (failure) throw failure; }
@@ -118,11 +119,14 @@ export function createSkinBrushStroke(index: SkinBrushIndex, options: SkinBrushO
             if (!Number.isFinite(coverage)) throw Error("Brush segment could not be evaluated.");
             if (coverage <= 0) return;
             const previous = affected.get(component);
-            if (previous) { previous.coverage = Math.max(previous.coverage, coverage); return; }
+            if (previous) {
+              if (coverage > previous.coverage) { previous.coverage = coverage; previous.smooth = options.smooth?.(component, coverage); }
+              return;
+            }
             if (affected.size >= limit) throw Error(`Brush stroke exceeds the ${limit.toLocaleString("en-US")} component limit. Use a smaller brush or shorter stroke.`);
             const base = getWeight(component);
             if (!Number.isFinite(base) || base < 0 || base > 1) throw Error("Brush component weights must be finite values between zero and one.");
-            affected.set(component, { base, coverage });
+            affected.set(component, { base, coverage, smooth: options.smooth?.(component,coverage) });
           });
       } catch (error) {
         failure = error instanceof Error ? error : new Error(String(error));
@@ -131,6 +135,7 @@ export function createSkinBrushStroke(index: SkinBrushIndex, options: SkinBrushO
     },
     values() {
       check();
+      if (mode === "smooth") return [...affected.values()].flatMap(hit => hit.smooth ? [hit.smooth] : []);
       return [...affected].sort(([a], [b]) => a - b).map(([index, { base, coverage }]) => ({ index, base,
         weight: mode === "replace" ? base === value ? base : MathUtils.lerp(base, value, coverage)
           : MathUtils.clamp(base + (mode === "add" ? 1 : -1) * value * coverage, 0, 1),

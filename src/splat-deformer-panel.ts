@@ -1,9 +1,14 @@
+import { rebindLattice } from "./splat-lattice-rebind.ts";
+import { latticePointGroup } from "./splat-point-selection.ts";
+import type { SplatLattice } from "./splat-lattice.ts";
+import { deformerTrackId } from "./splat-deformer-tracks.ts";
+import { assertSplatDeformerUndoFits, trimSplatDeformerHistory } from "./splat-deformer-history.ts";
 import type { Box3 } from "three";
 import type { SceneDocument, SplatShapeNode } from "./scene-document.ts";
 import type { SceneStore } from "./scene-store.ts";
 import { propertyInteraction } from "./property-interaction.ts";
 import {
-  getSplatDeformerDefinition, keySplatDeformer, sampleSplatDeformer, SPLAT_DEFORMER_DEFINITIONS,
+  getSplatDeformerDefinition, keySplatDeformer, keySplatDeformerControls, sampleSplatDeformer, SPLAT_DEFORMER_DEFINITIONS,
   SPLAT_DEFORMER_LIMITS, splatDeformerControls, validateSceneSplatDeformers, withSplatDeformerControl,
   withSplatDeformerWeights, type SplatDeformer, type SplatDeformerControl,
 } from "./splat-deformers.ts";
@@ -24,49 +29,11 @@ type PanelOptions = {
   canKey(): boolean;
   autoKey(): boolean;
   preflight(shape: SplatShapeNode): void;
+  onGraph?(trackId: string): void;
   onPreview(): void;
   onHandleChange(active: boolean): void;
   onContextChange?: () => void;
 };
-
-function historySize(doc: SceneDocument, seen: Set<object>) {
-  let bytes = 0;
-  for (const shape of Object.values(doc.nodes)) if (shape.type === "splatShape") for (const entry of shape.deformers ?? []) {
-    if (entry.weights && !seen.has(entry.weights)) {
-      seen.add(entry.weights);
-      bytes += entry.weights.length * 72;
-    }
-    if (entry.keys && !seen.has(entry.keys)) {
-      seen.add(entry.keys);
-      bytes += entry.keys.length * 120;
-    }
-    if (entry.params && typeof entry.params === "object" && !seen.has(entry.params)) {
-      seen.add(entry.params);
-      bytes += JSON.stringify(entry.params).length * 8;
-    }
-  }
-  return bytes;
-}
-
-export function assertSplatDeformerUndoFits(before: SceneDocument, after: SceneDocument) {
-  const seen = new Set<object>();
-  if (historySize(after, seen) + historySize(before, seen) > SPLAT_DEFORMER_LIMITS.historyBytes)
-    throw Error("This edit exceeds the splat deformer undo budget.");
-}
-
-export function trimSplatDeformerHistory(store: SceneStore) {
-  const seen = new Set<object>();
-  let bytes = historySize(store.getState().document, seen);
-  const past = store.temporal.getState().pastStates;
-  let first = past.length;
-  while (first > 0) {
-    const state = past[first - 1];
-    if (state.document) bytes += historySize(state.document, seen);
-    if (bytes > SPLAT_DEFORMER_LIMITS.historyBytes) break;
-    first--;
-  }
-  if (first) store.temporal.setState({ pastStates: past.slice(first) });
-}
 
 function commit(store: SceneStore, shapeId: string, edits: readonly SplatDeformer[], label: string, preflight: PanelOptions["preflight"]) {
   const before = store.getState().document, shape = before.nodes[shapeId];
@@ -97,9 +64,10 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
   const status = element.querySelector<HTMLElement>("[data-status]")!, body = element.querySelector<HTMLElement>("[data-body]")!;
   const bindingPanelHost = element.querySelector<HTMLElement>("[data-binding]")!;
   let shapeId = "", id = "", index = 0, editHandles = false;
+  let indices = [0];
   let error = "";
   let preview: { document: SceneDocument; frame: number; shapeId: string; stack: readonly SplatDeformer[] } | undefined;
-  let rendered: { shape: SplatShapeNode | undefined; frame: number; id: string; index: number; enabled: boolean; selected: number; handles: boolean } | undefined;
+  let rendered: { shape: SplatShapeNode | undefined; frame: number; id: string; index: number; enabled: boolean; canKey: boolean; selected: number; handles: boolean } | undefined;
 
   function clearPreview(repaint = true) {
     if (!preview) return;
@@ -123,22 +91,22 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
     run(() => {
       const context = options.context(), definition = getSplatDeformerDefinition(kind);
       if (!definition || !context || !options.available()) return;
-      const { shape, count, componentMode, indices, weights } = context;
+      const { shape, count, componentMode, indices: selected, weights } = context;
       if (count > SPLAT_DEFORMER_LIMITS.sourceCount) throw Error("Deformers support up to 100,000 original splats per shape.");
-      if (componentMode && !indices.length) throw Error("Select splats, or return to Object mode to deform the whole shape.");
-      const bounds = context.restBounds(componentMode ? indices : undefined);
+      if (componentMode && !selected.length) throw Error("Select splats, or return to Object mode to deform the whole shape.");
+      const bounds = context.restBounds(componentMode ? selected : undefined);
       if (bounds.isEmpty()) throw Error("The deformer needs a visible original splat.");
       const stack = shape.deformers ?? [];
       let suffix = 1;
       while (stack.some(entry => entry.name === definition.name + " " + suffix)) suffix++;
       const entry: SplatDeformer = {
         id: crypto.randomUUID(), name: definition.name + " " + suffix, kind, envelope: 1, sourceCount: count,
-        weights: componentMode ? Array.from(indices, (index, offset) => ({ index, weight: weights[offset] })).filter(row => row.weight > 0) : undefined,
+        weights: componentMode ? Array.from(selected, (index, offset) => ({ index, weight: weights[offset] })).filter(row => row.weight > 0) : undefined,
         params: definition.create(bounds),
       };
       clearPreview(false);
       id = entry.id;
-      index = 0;
+      index = 0; indices = [0];
       commit(store, shape.id, [...stack, entry], `Create ${definition.name}`, options.preflight);
     });
   }
@@ -165,21 +133,37 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
 
   function applyControls(entry: SplatDeformer, values: { id: string; value: number }[]) {
     let next = entry;
+    const keyed = new Set(entry.keys?.map(key => key.channel));
+    const edits: { id: string; value: number }[] = [];
     const fields = new Map(splatDeformerControls(entry).map(control => [control.id, control]));
     for (const control of values) {
       const field = fields.get(control.id);
       if (!field) continue;
       const keyable = !field.toggle;
-      if (keyable && options.canKey() && (options.autoKey() || next.keys?.some(key => key.channel === control.id))) {
-        next = keySplatDeformer(next, control.id, Math.round(options.frame()), control.value);
+      if (keyable && keyed.has(control.id) && !options.canKey()) throw Error("Select base animation to edit keyed deformer controls.");
+      if (keyable && options.canKey() && (options.autoKey() || keyed.has(control.id))) {
+        edits.push(control);
       } else next = withSplatDeformerControl(next, control.id, control.value, field);
     }
-    return next;
+    return edits.length ? keySplatDeformerControls(next, Math.round(options.frame()), edits) : next;
+  }
+
+  function controlChanges(evaluated: SplatDeformer, control: SplatDeformerControl<unknown>, value: number) {
+    if (indices.length === 1 || !control.id.startsWith("point.")) return [{ id: control.id, value }];
+    const axis = control.id.slice(-1), delta = value - control.value;
+    return activeControls(evaluated).filter(c => c.id.startsWith("point.") && c.id.endsWith("." + axis))
+      .map(c => ({ id: c.id, value: c.value + delta }));
   }
 
   function setControl(shape: SplatShapeNode, entry: SplatDeformer, control: SplatDeformerControl<unknown>, value: number) {
     if (!options.available() || value === control.value) { clearPreview(); return; }
-    change(shape, applyControls(entry, [{ id: control.id, value }]), `Edit ${control.label}`);
+    const changes = controlChanges(sampleSplatDeformer(entry, options.frame()), control, value);
+    change(shape, applyControls(entry, changes), `Edit ${control.label}`);
+  }
+
+  function activeControls(entry: SplatDeformer) {
+    const controls = new Map(indices.flatMap(i => splatDeformerControls(entry, i)).map(field => [field.id, field]));
+    return Array.from(controls.values());
   }
 
   function numeric(label: string, value: number, min: number | undefined, max: number | undefined, step: number) {
@@ -210,10 +194,15 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
       return row;
     }
     const input = numeric(control.label, control.value, control.min, control.max, control.step ?? 0.01);
+    input.dataset.deformerChannel = control.id;
     const original = input.value;
     const update = (value: number) => {
       if (!options.available() || store.getState().document.nodes[shape.id] !== shape) return;
-      try { previewEntry(shape, withSplatDeformerControl(evaluated, control.id, value)); }
+      try {
+        let draft = evaluated;
+        for (const change of controlChanges(evaluated, control, value)) draft = withSplatDeformerControl(draft, change.id, change.value);
+        previewEntry(shape, draft);
+      }
       catch { clearPreview(); }
     };
     const finish = () => {
@@ -242,6 +231,7 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
     label.append(input);
     const frame = Math.round(options.frame()), atFrame = entry.keys?.some(key => key.channel === control.id && key.frame === frame);
     const key = button(atFrame ? "◆" : "◇", () => run(() => {
+      if (!options.available() || !options.canKey()) return;
       const next = atFrame ? { ...entry, keys: entry.keys?.filter(value => value.channel !== control.id || value.frame !== frame) }
         : keySplatDeformer(entry, control.id, frame, control.value);
       change(shape, next, atFrame ? `Remove ${control.label} key` : `Key ${control.label}`);
@@ -249,6 +239,11 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
     key.setAttribute("aria-label", `${atFrame ? "Remove key for" : "Key"} ${control.label}`);
     key.title = key.getAttribute("aria-label")!;
     key.disabled = !options.canKey();
+    if (key.disabled) key.title = "Select base animation in Animation mode to key deformer controls.";
+    if (!key.disabled && entry.keys?.some(k => k.channel === control.id)) {
+      key.title += " · Right-click to show curve";
+      key.oncontextmenu = event => { event.preventDefault(); options.onGraph?.(deformerTrackId(shape.id, entry.id, control.id)); };
+    }
     row.append(label, key);
     return row;
   }
@@ -263,21 +258,39 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
 
   function refresh() {
     const context = options.context(), shape = context?.shape, stack = shape?.deformers ?? [];
-    const enabled = options.available();
+    const enabled = options.available(), canKey = options.canKey();
     if (shape?.id !== shapeId || !stack.some(value => value.id === id)) {
       shapeId = shape?.id ?? "";
       id = stack[0]?.id ?? "";
-      index = 0;
+      index = 0; indices = [0];
       editHandles = false;
     }
     if (!validPreview()) preview = undefined;
     add.disabled = !context || !enabled || stack.length >= SPLAT_DEFORMER_LIMITS.perShape;
     status.textContent = error || (!context ? "Select one splat object." :
       context.componentMode ? `${context.indices.length.toLocaleString()} selected originals` : `${context.count.toLocaleString()} original splats`);
-    const frame = enabled ? options.frame() : 0, selected = context?.indices.length ?? 0;
-    if (rendered?.shape === shape && rendered?.frame === frame && rendered.id === id && rendered.index === index &&
-      rendered.enabled === enabled && rendered.selected === selected && rendered.handles === editHandles) return;
-    rendered = { shape, frame, id, index, enabled, selected, handles: editHandles };
+    const frame = options.frame(), selected = context?.indices.length ?? 0;
+    if (rendered && rendered.shape === shape && rendered.id === id && rendered.index === index &&
+      rendered.enabled === enabled && rendered.canKey === canKey && rendered.selected === selected && rendered.handles === editHandles) {
+      if (rendered.frame === frame) return;
+      if (!enabled) {
+        // During playback keep the inspector alive and update only displayed values.
+        // A hidden inspector resamples when it next becomes visible or editable.
+        if (!element.getClientRects().length) return;
+        const entry = stack.find(e => e.id === id);
+        if (entry) {
+          const sampled = sampleSplatDeformer(entry, frame);
+          const controls = new Map(splatDeformerControls(sampled, index).map(c => [c.id, c.value]));
+          body.querySelectorAll<HTMLInputElement>("input[data-deformer-channel]").forEach(input => {
+            const value = controls.get(input.dataset.deformerChannel!);
+            if (value !== undefined) input.value = String(Number(value.toPrecision(9)));
+          });
+        }
+        rendered.frame = frame;
+        return;
+      }
+    }
+    rendered = { shape, frame, id, index, enabled, canKey, selected, handles: editHandles };
     body.replaceChildren();
     const offset = stack.findIndex(entry => entry.id === id), entry = stack[offset];
     if (!shape || !entry) { options.onContextChange?.(); return; }
@@ -289,7 +302,7 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
     choice.onchange = () => {
       clearPreview();
       id = choice.value;
-      index = 0;
+      index = 0; indices = [0];
       refresh();
       options.onHandleChange(editHandles);
     };
@@ -325,11 +338,46 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
       const count = adapter.count(evaluated.params);
       if (count > 1) {
         index = Math.min(index, count - 1);
+        indices = indices.filter(i => i < count);
+        if (!indices.includes(index)) indices.push(index);
         const handles = document.createElement("select");
         handles.setAttribute("aria-label", "Deformer handle");
         for (let i = 0; i < count; i++) handles.add(new Option(adapter.name?.(i) ?? `Point ${i + 1}`, String(i), false, index === i));
         handles.onchange = () => selectHandle(Number(handles.value));
         fields.append(handles);
+        if (entry.kind === "cage" || entry.kind === "lattice") {
+          const group = document.createElement("div");
+          group.className = "splat-deformer-tools";
+          const mode = document.createElement("select");
+          mode.setAttribute("aria-label", "Select control points");
+          mode.add(new Option("Select points…", ""));
+          mode.add(new Option("Active point only", "one"));
+          mode.add(new Option("All points", "all"));
+          if (entry.kind === "lattice") for (const axis of ["X", "Y", "Z"]) {
+            mode.add(new Option(`Row along ${axis}`, "row" + axis));
+            mode.add(new Option(`Plane normal to ${axis}`, "plane" + axis));
+          }
+          mode.onchange = () => {
+            const name = mode.value;
+            if (!name) return;
+            const next = name === "one" ? [index] : name === "all" ? Array.from({ length: count }, (_, i) => i)
+              : latticePointGroup((entry.params as SplatLattice).divisions, index, "XYZ".indexOf(name.slice(-1)), name.startsWith("plane"));
+            selectPoints(index, next);
+          };
+          const list = document.createElement("input");
+          list.type = "text"; list.setAttribute("aria-label", "Selected point numbers");
+          list.value = indices.map(i => i + 1).join(", ");
+          list.title = "Enter point numbers separated by commas. Shift-click viewport points to toggle.";
+          list.onchange = () => run(() => {
+            const values = list.value.split(",").map(s => Number(s.trim()) - 1);
+            if (!values.length || values.some(i => !Number.isInteger(i) || i < 0 || i >= count)) throw Error(`Choose point numbers from 1 to ${count}.`);
+            const unique = [...new Set(values)];
+            selectPoints(unique[unique.length - 1], unique);
+          });
+          const countLabel = document.createElement("span");
+          countLabel.textContent = `${indices.length} selected`;
+          group.append(mode, list, countLabel); fields.append(group);
+        }
       }
     }
     const mask = document.createElement("select"), maskLabel = document.createElement("label");
@@ -354,18 +402,27 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
     options.onContextChange?.();
   }
 
-  function selectHandle(handleIndex: number) {
-    if (index === handleIndex) return;
+  function selectPoints(active: number, selected: number[]) {
     clearPreview();
-    index = handleIndex;
+    index = active;
+    indices = selected;
+    rendered = undefined;
     refresh();
     options.onHandleChange(editHandles);
+  }
+  function selectHandle(handleIndex: number, toggle = false) {
+    if (!toggle) { selectPoints(handleIndex, [handleIndex]); return; }
+    if (indices.includes(handleIndex)) {
+      if (indices.length === 1) return;
+      const next = indices.filter(i => i !== handleIndex);
+      selectPoints(next[next.length - 1], next);
+    } else selectPoints(handleIndex, [...indices, handleIndex]);
   }
 
   function selectedHandle() {
     if (!editHandles || !element.getClientRects().length || options.context()?.shape.id !== shapeId) return;
     const target = authored(shapeId, id);
-    if (target && getSplatDeformerDefinition(target.entry.kind)?.handle) return { shapeId, id, index };
+    if (target && getSplatDeformerDefinition(target.entry.kind)?.handle) return { shapeId, id, index, indices };
   }
 
   function paramsForHandle(targetShape: string, targetId: string) {
@@ -416,6 +473,12 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
         else clearPreview();
       });
     },
+    rebindLattice(targetShape: string, targetId: string, params: SplatLattice, reset: boolean) {
+      const target = authored(targetShape, targetId);
+      if (!target || target.entry.kind !== "lattice") throw Error("Select a lattice to rebind.");
+      const next = rebindLattice(target.entry, params, reset);
+      if (next !== target.entry) change(target.shape, next, reset ? "Reset splat lattice" : "Rebind splat lattice");
+    },
     replaceParams(targetShape: string, targetId: string, params: unknown, label: string) {
       run(() => {
         const target = authored(targetShape, targetId);
@@ -424,21 +487,26 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
     },
     keyActive() {
       const target = authored(shapeId, id);
-      if (!target || !selectedHandle() || !options.available() || !options.canKey()) return false;
+      if (!target || !selectedHandle()) return false;
+      if (!options.available() || !options.canKey()) {
+        error = "Select base animation in Animation mode to edit deformer keys."; refresh(); return true;
+      }
       run(() => {
         const frame = Math.round(options.frame()), sampled = sampleSplatDeformer(target.entry, options.frame());
-        const controls = splatDeformerControls(sampled, index).filter(control => !control.toggle);
-        let keyed = target.entry;
-        for (const control of controls) keyed = keySplatDeformer(keyed, control.id, frame, control.value);
+        const controls = activeControls(sampled).filter(control => !control.toggle);
+        const keyed = keySplatDeformerControls(target.entry, frame, controls);
         change(target.shape, keyed, "Set deformer keys");
       });
       return true;
     },
     deleteKeysAtFrame() {
       const target = authored(shapeId, id);
-      if (!target || !selectedHandle() || !options.available() || !options.canKey()) return false;
+      if (!target || !selectedHandle()) return false;
+      if (!options.available() || !options.canKey()) {
+        error = "Select base animation in Animation mode to edit deformer keys."; refresh(); return true;
+      }
       const frame = Math.round(options.frame());
-      const channels = new Set(splatDeformerControls(target.entry, index).map(control => control.id));
+      const channels = new Set(activeControls(target.entry).map(control => control.id));
       const keys = target.entry.keys?.filter(key => key.frame !== frame || !channels.has(key.channel));
       if (keys?.length !== target.entry.keys?.length) run(() => change(target.shape, { ...target.entry, keys }, "Delete deformer keys"));
       return true;

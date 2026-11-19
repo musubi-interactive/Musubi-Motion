@@ -61,10 +61,14 @@ export function createSplatMaskPanel(store: SceneStore, options: Options) {
     numbers.push({ input, key, refresh: lock }); brush.append(row); return input;
   }
   brush.append(label("Operation", operation), label("Falloff", falloff)); number("Mask brush radius (px)", "radius", 1, 512, 1); number("Mask brush strength", "strength", 0, 1, .01); number("Mask brush value", "value", 0, 1, .01);
+  const depth = select("Mask brush occlusion", [["scene-visible","Scene visible"],["front","Front centers"],["through","Through"]]);
+  settings.depth = "scene-visible";
+  depth.onchange = () => updateSettings({ depth: depth.value as SplatMaskBrush["depth"] });
+  brush.append(label("Occlusion", depth));
   const selectedOnly = check("Paint selected components only"); brush.append(selectedOnly.row);
   const paint = button("Start painting mask", () => { const ctx = currentMask(); if (ctx.mask.locked) throw Error("Unlock this mask layer first."); const next = !painting; options.onPaint(next ? { ...settings, shapeId: ctx.identity.shapeId, maskId } : undefined); painting = next; refresh(); });
   const flood = button("Flood all original IDs", () => { const ctx = currentMask(); updateSplatMask(store, ctx.identity, maskId, "Flood splat scalar mask", mask => transformMask(mask, "flood", settings.mode === "erase" ? 0 : settings.value)); });
-  brush.append(paint, flood, p("Paint posed eligible centers through surfaces with a continuous brush. B + drag resizes. Escape, pointer cancel or view/scene changes restore the original mask; release commits one stroke. Up to 100,000 edited IDs per stroke; 20,000 overlay markers are a display sample. Smooth averages immutable mask values in the surrounding 3×3 screen cells (32 px each), not mesh topology."));
+  brush.append(paint, flood, p("Paint posed eligible centers with the chosen occlusion mode with a continuous brush. B + drag resizes. Escape, pointer cancel or view/scene changes restore the original mask; release commits one stroke. Up to 100,000 edited IDs per stroke; 20,000 overlay markers are a display sample. Smooth averages immutable mask values in the surrounding 3×3 screen cells (32 px each), not mesh topology."));
   operation.onchange = () => updateSettings({ mode: operation.value as SplatMaskBrush["mode"] }); falloff.onchange = () => updateSettings({ falloff: falloff.value as SplatMaskBrush["falloff"] }); selectedOnly.input.onchange = () => updateSettings({ selectedOnly: selectedOnly.input.checked });
   const utilities = fieldset("Mask Operations"), threshold = document.createElement("input"); threshold.type = "number"; threshold.min = "0"; threshold.max = "1"; threshold.step = ".01"; threshold.value = ".5"; threshold.setAttribute("aria-label", "Mask selection threshold");
   const source = select("Combine source mask"), combine = select("Mask combine operation", [["multiply", "Multiply"], ["add", "Add / clamp"], ["subtract", "Subtract / clamp"], ["min", "Minimum"], ["max", "Maximum"]]);

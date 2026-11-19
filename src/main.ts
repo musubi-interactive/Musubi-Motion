@@ -1,4 +1,6 @@
-import { assertSplatDeformerUndoFits, trimSplatDeformerHistory } from "./splat-deformer-panel.ts";
+import { splatCurveProbeFrames } from "./splat-curve-preflight.ts";
+import { selectedPointPose, transformSelectedPoints } from "./splat-point-selection.ts";
+import { assertSplatDeformerUndoFits, trimSplatDeformerHistory } from "./splat-deformer-history.ts";
 import { createSplatControlOverlay, splatCageControlLayout } from "./splat-control-overlay.ts";
 import { createSplatCageBindingPanel } from "./splat-cage-binding-panel.ts";
 import { createSplatCageFromGeometry } from "./splat-cage.ts";
@@ -22,6 +24,8 @@ import { createProceduralGraphPanel } from "./procedural-graph-panel.ts";
 import { createTextureAssetsPanel } from "./texture-assets-panel.ts";
 import { createMaterialPanel } from "./material-panel.ts";
 import { collectEmbeddedTextures, validateTextureDecoding, type TextureAsset } from "./texture-assets.ts";
+import { prepareSplatMorphPose, splatMorphPose, validateSplatMorphs } from "./splat-morph.ts";
+import { timelineSplatMorphPose } from "./splat-morph-animation.ts";
 import { meshToSplatData } from "./mesh-to-splats";
 import { createMeshSplatColors } from "./mesh-splat-colors";
 import { cubeToSplatBytes, cubeSplatFaces } from "./cube-to-splats";
@@ -85,7 +89,7 @@ import type WaDropdown from "@awesome.me/webawesome/dist/components/dropdown/dro
 import type WaDialog from "@awesome.me/webawesome/dist/components/dialog/dialog.js";
 import packageInfo from "../package.json";
 import "./style.css";
-import { defaultAnimation, editingTracks, evaluateChannels, evaluateSceneAnimation, keyChannels, setKeys, type AnimationPose } from "./animation.ts";
+import { POSE_ANIMATION_CHANNELS, defaultAnimation, editingTracks, evaluateChannels, evaluateSceneAnimation, keyChannels, setKeys, type AnimationPose } from "./animation.ts";
 import { evaluateDrivenKeys } from "./driven-keys.ts";
 import { mountTimeline } from "./timeline-panel.ts";
 import { advanceFrame } from "./animation-playback.ts";
@@ -114,7 +118,8 @@ import { createBinding } from "./splat-binding.ts";
 import { validateSkinWeightCount, editSkinWeightValues } from "./skin-weights.ts";
 import { createSkinWeightsPanel } from "./skin-weights-panel.ts";
 import { createSkinWeightPreview } from "./skin-weight-preview.ts";
-import { assertSplatTransformUndoFits, captureSplatComponentTransform, trimSplatTransformHistory, validateSplatComponentTransforms, withSplatComponentTransforms, type SplatComponentTransforms } from "./splat-component-transforms.ts";
+import { assertSplatTransformUndoFits, captureSplatComponentTransform, trimSplatTransformHistory, transformGaussianTRS, validateSplatComponentTransforms, withSplatComponentTransforms, type SplatComponentTransforms } from "./splat-component-transforms.ts";
+import { splatArchiveFrames, stageSplatTimelineFrame, type SplatFrameJob } from "./splat-timeline.ts";
 import { createSplatTransformRuntime, type SplatTransformRuntime } from "./splat-transform-runtime.ts";
 import { combineWeightedSplatSelection, defaultSplatSoftSettings, hardSplatSelection, selectSplatRadial, selectSplatSphere, splatSelectionWeight, splatSoftCoreFraction, validateSplatSoftSettings, validateWeightedSplatSelection, type SplatSoftSettings, type WeightedSplatSelection } from "./splat-soft-selection.ts";
 import { createSplatSoftPreview } from "./splat-soft-selection-preview.ts";
@@ -141,6 +146,9 @@ import { createTerminal } from "./terminal-panel.ts";
 import { elasticityDefaults, elasticEdges, validateElasticity } from "./elasticity";
 import { createElasticityPanel } from "./elasticity-panel";
 import { mountViewportTools, type ViewName } from "./viewport-tools";
+import { commitWeightRows } from "./skin-weights.ts";
+import type { CleanupContext } from "./skin-weight-smoothing.ts";
+import { readSceneSelectionDepth } from "./splat-depth.ts";
 import { createSplatDepthPanel } from "./splat-depth-panel.ts";
 import { createRiggingPanel, mountRiggingPanel } from "./rigging-panel.ts";
 const riggingPanel = createRiggingPanel();
@@ -277,7 +285,13 @@ async function start() {
   const orthographic = new THREE.OrthographicCamera(-4,4,4,-4,.01,1000);
   let camera:THREE.PerspectiveCamera|THREE.OrthographicCamera=perspective;
   let activeView:ViewName="perspective", gizmosVisible=true, jointsVisible=true;
-  const store = createSceneStore();
+  const store = createSceneStore(undefined, (candidate, shape, probes) => {
+    const settings = candidate.animation ?? defaultAnimation();
+    const current = timelinePanel?.turntable ? settings.start : Math.max(settings.start, Math.min(settings.end, getFrame()));
+    // Prepare the displayed pose last so publication reuses the verified candidate.
+    for (const frame of splatCurveProbeFrames(shape, probes, current)) preflightDeformerPose(candidate, shape, frame);
+    preflightDeformerPose(candidate, shape, current);
+  });
   // GPU objects and asset bytes are excluded from the document and undo snapshots.
   const runtime = new Map<string, RuntimeObject>();
   const assetFiles = new Map<string, File>();
@@ -309,6 +323,7 @@ async function start() {
   let loading = false,
     playing = false,
     time = 0,
+    orbitTime = 0,
     previous = 0;
   let dragId: string | undefined;
   let dragControlPose: { id: string; pose: AnimationPose; node?: TransformNode } | undefined;
@@ -379,7 +394,7 @@ async function start() {
       object.mesh, object.polygon.triangleFaceIds, meshComponentRequest.mode, preview?.edgeIds ?? meshComponentIds);
     meshComponentPreview.setVisible(gizmosVisible && !playing && !loading);
   }
-  let weightPreview: { shapeId: string; indices: number[]; jointId: string } | undefined;
+  let weightPreview: { values?: number[]; shapeId: string; indices: number[]; jointId: string } | undefined;
   const weightOverlay = createSkinWeightPreview();
   let componentPickShape: string | undefined, componentPickEpoch = 0, pendingComponentPick: number | undefined;
   let splatComponent: SplatSelectionIdentity | undefined, splatComponentIds: Uint32Array = new Uint32Array();
@@ -416,7 +431,9 @@ async function start() {
   let channelKeys: ReturnType<typeof mountChannelKeyControls> | undefined;
   let evaluationError = "";
   const animationSettings = () => store.getState().document.animation ?? defaultAnimation();
-  const getFrame = () => time * animationSettings().fps;
+  let pendingTime: { seconds: number; controller: AbortController } | undefined;
+  let playbackElapsed = 0;
+  const getFrame = () => timelinePanel?.turntable ? animationSettings().start : time * animationSettings().fps;
   const allSelection = (): string[] => {
     const doc = store.getState().document, joints = new Set(doc.joints?.map(joint => joint.id));
     // Earlier store subscribers can refresh panels before syncScene prunes selection.
@@ -456,13 +473,65 @@ async function start() {
     poseDrafts.capture(doc, poseOverrides);
     store.setState({ document: doc, editLabel: label });
   }
+  function preflightSceneFrame(doc: SceneDocument, frame: number) {
+    for (const shape of Object.values(doc.nodes)) {
+      if (shape.type === "splatShape" && (shape.morphSurface || shape.deformers?.length)) preflightDeformerPose(doc, shape, frame);
+    }
+  }
+  function navigationFrame() {
+    return pendingTime ? pendingTime.seconds * animationSettings().fps : getFrame();
+  }
+  function cancelPendingTime() {
+    pendingTime?.controller.abort();
+    pendingTime = undefined;
+  }
+  function requestTimelineTime(seconds: number, stopAtEnd = false) {
+    if (pendingTime?.seconds === seconds) return;
+    cancelPendingTime();
+    const doc = store.getState().document, frame = seconds * animationSettings().fps;
+    const jobs: SplatFrameJob[] = [];
+    for (const shape of Object.values(doc.nodes)) {
+      if (shape.type !== "splatShape") continue;
+      const animated = shape.deformers?.some(entry => entry.keys?.length);
+      const visits = (animated ? shape.deformers!.reduce((n, entry) => n + (entry.weights?.length ?? entry.sourceCount), 0) : 0)
+        + (shape.morphSurface?.sourceCount ?? 0);
+      if (!animated && !shape.morphSurface) continue;
+      const object = runtime.get(shape.parentId);
+      if (object?.kind === "splat" && object.transforms) jobs.push({ shape, transforms: object.transforms, visits, morph: timelineSplatMorphPose(doc, shape, frame) });
+    }
+    function publish() {
+      time = seconds;
+      if (stopAtEnd) setPlaying(false);
+      updateTime();
+    }
+    if (!jobs.length) { publish(); return; }
+    // The viewport, picking, timeline and skinning advance together. Keep the last
+    // complete frame interactive while the requested frame is staged in slices.
+    if (seconds !== time) skinPoseVersion++;
+    const controller = new AbortController(), signal = controller.signal;
+    pendingTime = { seconds, controller };
+    function reject(error: unknown) {
+      if (signal.aborted) return;
+      setPlaying(false);
+      notice.textContent = error instanceof Error ? error.message : String(error);
+      updateTime(false);
+    }
+    try {
+      const staged = stageSplatTimelineFrame(jobs, frame, signal, () => {
+        if (signal.aborted) return;
+        pendingTime = undefined;
+        if (!loading && !dragId && doc === store.getState().document) publish();
+      });
+      staged?.catch(reject);
+    } catch (error) { reject(error); }
+  }
   function setFrame(frame: number) {
-    if (!Number.isFinite(frame) || loading || dragId) return;
-    setPlaying(false); clearPoseDraft();
+    if (!Number.isFinite(frame) || loading || dragId || timelinePanel?.turntable) return;
+    if (playing) setPlaying(false);
+    clearPoseDraft();
     deformerPanel?.cancelPreview(false);
     const settings = animationSettings();
-    time = Math.max(settings.start, Math.min(settings.end, Math.round(frame))) / settings.fps;
-    updateTime();
+    requestTimelineTime(Math.max(settings.start, Math.min(settings.end, Math.round(frame))) / settings.fps);
   }
   function keySelection() {
     if (deformerPanel?.keyActive()) return;
@@ -498,7 +567,7 @@ async function start() {
     const shape = store.getState().document.nodes[weightPreview.shapeId];
     if (!entry || shape?.type !== "splatShape" || !shape.binding?.jointIds.includes(weightPreview.jointId)
       || weightPreview.indices.some(index => index < 0 || index >= entry.skin.componentCount)) { weightOverlay.clear(); return; }
-    const weights = weightPreview.indices.map(index => entry.skin.getWeights(index).find(influence => influence.jointId === weightPreview!.jointId)?.weight ?? 0);
+    const weights = weightPreview.values ?? weightPreview.indices.map(index => entry.skin.getWeights(index).find(influence => influence.jointId === weightPreview!.jointId)?.weight ?? 0);
     weightOverlay.update(entry.mesh, entry.skin.getComponentPositions(weightPreview.indices), weights);
   }
   function boundSelection(object:RuntimeObject) {
@@ -507,6 +576,8 @@ async function start() {
   }
   function objectBounds(object: RuntimeObject) {
     if (object.kind !== "splat") return object.bounds;
+    if (!object.transformedBounds && object.transforms?.value)
+      object.transformedBounds = object.transforms.bounds(index => index < object.count && (!object.edits || object.edits.active(index)));
     const bounds = object.transformedBounds ?? object.edits?.bounds ?? object.bounds, margin = object.appearance?.boundsMargin;
     return margin ? bounds.clone().expandByScalar(margin) : bounds;
   }
@@ -541,8 +612,8 @@ async function start() {
     const source = object.mesh.extSplats ?? object.mesh.packedSplats; if (!source) return;
     const binding = bindings.get(shape.id), count = binding?.skin.componentCount ?? source.numSplats;
     return { shape, object, identity: { shapeId: shape.id, assetId: shape.assetId, count }, selected: splatComponent?.shapeId === shape.id ? splatComponentIds : emptyMaskSelection,
-      getPositions(indices: number[]) {
-        const positions = binding ? binding.skin.getComponentPositions(indices, true) : object.transforms?.positions(indices) ?? readOriginalSplatPositions(object.mesh, indices);
+      getPositions(indices: number[], visible = false) {
+        const positions = binding ? binding.skin.getComponentPositions(indices, !visible) : object.transforms?.positions(indices, visible ? object.attributePaint ?? object.appearance : undefined) ?? readOriginalSplatPositions(object.mesh, indices);
         if (object.edits) indices.forEach((index, offset) => { if (!object.edits!.active(index)) positions.fill(NaN, offset * 3, offset * 3 + 3); });
         return positions;
       } };
@@ -612,7 +683,7 @@ async function start() {
     try {
       cancelComponentScan(); scan = splatScanSnapshot(); if (!scan) return;
       const options = { componentCount: scan.context.count, readPositions: (offset: number, count: number) => scan!.context.getPositions(Array.from({ length: count }, (_, index) => offset + index)),
-        matrixWorld: scan.meshWorld, camera: scan.cameraRef, width: scan.rect.width, height: scan.rect.height, depth: splatSelectionDepth, cancelled: scan.cancelled };
+        matrixWorld: scan.meshWorld, camera: scan.cameraRef, width: scan.rect.width, height: scan.rect.height, depth: splatSelectionDepth, readDepth: splatSelectionDepth === "scene-visible" ? readSceneDepth : undefined, cancelled: scan.cancelled };
       const settings = structuredClone(splatSoftSettings);
       const hits = region.tool === "sphere" ? await selectSplatSphere(options, settings) : await selectSplatRadial(options, region.center!, settings);
       if (scan.cancelled()) throw new DOMException("Falloff scan cancelled; previous weights unchanged.", "AbortError");
@@ -673,9 +744,19 @@ async function start() {
     if (!context || !identity || playing || loading || pendingComponentPick !== undefined) throw Error("Select visible splats before transforming them.");
     context.object.mesh.updateWorldMatrix(true, false);
     const source = context.object.mesh.extSplats ?? context.object.mesh.packedSplats!;
+    const pose = timelineSplatMorphPose(store.getState().document, context.shape, getFrame());
+    const morph = pose && prepareSplatMorphPose(pose);
     const snapshot = captureSplatComponentTransform({ document: store.getState().document, identity, selected: splatComponentIds,
       weights: splatComponentWeights, weightFrame: { mode, pivot: useGizmoPivot ? splatComponentProxy.position.clone() : undefined, basis: objectOrientation === "object" ? context.object.mesh.getWorldQuaternion(new THREE.Quaternion()).normalize() : new THREE.Quaternion() },
-      world: context.object.mesh.matrixWorld, getRestCenter: index => source.getSplat(index).center, getGaussian: index => source.getSplat(index),
+      world: context.object.mesh.matrixWorld,
+      getRestCenter(index) {
+        const center = source.getSplat(index).center, affine = morph?.(index);
+        return affine ? center.clone().applyMatrix4(affine) : center;
+      },
+      getGaussian(index) {
+        const splat = source.getSplat(index), affine = morph?.(index);
+        return affine ? transformGaussianTRS(splat.quaternion, splat.scales, affine) : splat;
+      },
       getSkinMatrix: bindings.get(identity.shapeId)?.skin.getSkinMatrix });
     splatComponentProxy.updateWorldMatrix(true, false);
     return { document: store.getState().document, identity, snapshot, startInverse: splatComponentProxy.matrixWorld.clone().invert() };
@@ -782,9 +863,9 @@ async function start() {
       root.add(preview);
       const transforms = createSplatTransformRuntime(mesh);
       object = { kind: "splat", root, preview, box, mesh, ...data, assetId: result.assetId, transforms };
-      transforms.update(result.shape.componentTransforms, result.shape.deformers, result.shape.scalarMasks, timelinePanel?.turntable ? animationSettings().start : getFrame());
+      const frame = timelinePanel?.turntable ? animationSettings().start : getFrame();
+      transforms.update(result.shape.componentTransforms, result.shape.deformers, result.shape.scalarMasks, frame, timelineSplatMorphPose(result.document, result.shape, frame));
       transforms.setBound(!!result.shape.binding);
-      if (transforms.value) object.transformedBounds = transforms.bounds(index => index < data.count);
       if (result.shape.binding) skin = createBinding(mesh, result.shape.binding, undefined, before.joints, transforms);
       const file = new File([bytes], SPLAT_EXTRACTION_NAME);
       checkCurrent();
@@ -867,7 +948,7 @@ async function start() {
     for (let parent: THREE.Object3D | null = context.object.mesh; parent; parent = parent.parent) visible &&= parent.visible;
     splatPreview.points.visible = visible && !splatPaintTool?.active && splatComponentIds.length > 0;
     if (!splatDrag && !splatTransformPreview) refreshGizmo();
-    selectionLabel.textContent = `${splatComponentIds.length.toLocaleString()} / ${context.activeCount.toLocaleString()} splats selected${splatComponentIds.length > 20_000 ? " · 20,000 sampled highlights" : ""} · ${splatSelectionDepth === "through" ? "Through" : "Front centers"}`;
+    selectionLabel.textContent = `${splatComponentIds.length.toLocaleString()} / ${context.activeCount.toLocaleString()} splats selected${splatComponentIds.length > 20_000 ? " · 20,000 sampled highlights" : ""} · ${splatSelectionDepth === "through" ? "Through" : splatSelectionDepth === "scene-visible" ? "Scene visible" : "Front centers"}`;
     showSplatRegion(); refreshSplatPanel();
   }
   function exitSplatComponents() {
@@ -1039,6 +1120,7 @@ async function start() {
     }
   }
   function updateBindings() {
+    cancelPendingTime();
     skinPoseVersion++;
     const doc = store.getState().document;
     if (cachedJoints !== doc.joints) {
@@ -1064,14 +1146,14 @@ async function start() {
       const transformValue = splatTransformPreview?.shapeId === shape.id ? splatTransformPreview.value : shape.componentTransforms;
       const editChanged = object.edits?.value !== shape.componentEdits;
       const frame = timelinePanel?.turntable ? animationSettings().start : getFrame();
+      const sourceChanged = transforms.setBound(!!shape.binding, shape.elasticity);
       let transformChanged = false;
       try {
-        transformChanged = transforms.update(transformValue, deformerPanel?.deformersForShape(shape) ?? shape.deformers, shape.scalarMasks, frame);
+        transformChanged = transforms.update(transformValue, deformerPanel?.deformersForShape(shape) ?? shape.deformers, shape.scalarMasks, frame, splatMorphPose(shape, evaluated.get(shape.parentId)?.morphWeights));
       } catch (error) {
         notice.textContent = (error as Error).message;
-        transformChanged = transforms.update(transformValue);
+        // Keep the last complete geometry when a candidate pose fails validation.
       }
-      transforms.setBound(!!shape.binding);
       if (object.edits?.value !== shape.componentEdits) {
         if (!shape.componentEdits) { object.edits?.mask.dispose(); object.edits = undefined; }
         else {
@@ -1088,7 +1170,7 @@ async function start() {
           }
         }
       }
-      if (transformChanged || editChanged) object.transformedBounds = transforms.value ? transforms.bounds(index => index < object.count && (!object.edits || object.edits.active(index))) : undefined;
+      if (sourceChanged || transformChanged || editChanged || shape.elasticity) object.transformedBounds = undefined;
       if (!shape.binding) {
         applySplatPaintRuntime(shape, object, shape.attributePaint);
         continue;
@@ -1135,7 +1217,11 @@ async function start() {
       if (action === "Bind splats" && !joints.length) return;
       if (!shapes.length) { notice.textContent = "Select a splat object in the Outliner first."; return; }
       if (action === "Bind splats" && joints.length > 256) { notice.textContent = "Select at most 256 joints for binding."; return; }
-      setPlaying(false); time = 0; updateTime(); world.updateMatrixWorld(true);
+      try { preflightSceneFrame(doc, 0); }
+      catch (error) { notice.textContent = (error as Error).message; return; }
+      setPlaying(false);
+      timelinePanel?.setMode(false);
+      time = 0; updateTime(); world.updateMatrixWorld(true);
       terminal.log(`${action}: ${shapes.length} object(s); ${joints.length} selected joint(s).`);
       if (action === "Bind splats") terminal.log(`Joint influences: ${joints.map(j => j.name).join(", ")}. Up to four nearest joints per splat; inverse-distance weights.`);
       const nodes = {...doc.nodes};
@@ -1195,10 +1281,11 @@ async function start() {
   controls.enableDamping = true;
   const spark = new SparkRenderer({ renderer: webgl, accumExtSplats: true, covSplats: true });
   world.add(spark);
+  const readSceneDepth = (cancelled: () => boolean) => readSceneSelectionDepth(webgl, world, spark, camera, () => runtime.values(), cancelled);
   const depth = createSplatDepthPanel({
     menu: element<WaDropdown>("display-menu"), renderer: webgl, world, spark, objects: () => runtime.values(),
     getFrame: () => ({
-      document: store.getState().document, sceneName, frame: getFrame(), time, view: activeView,
+      document: store.getState().document, sceneName, frame: getFrame(), time: timelinePanel?.turntable ? orbitTime : time, view: activeView,
       camera, orbitTarget: controls.target, available: !loading && !playing && !dragId && !meshTopologyPreview && !splatPaintTool?.busy && !splatMaskPaintTool?.busy,
     }),
     report: message => { element("file-status").textContent = message; },
@@ -1267,9 +1354,9 @@ async function start() {
   }
   // Keep the proxy in the same object-local space as the authored rest handles.
   const cageBindingPanel = createSplatCageBindingPanel({
-    rebindLattice(shapeId, id, params) {
+    rebindLattice(shapeId, id, params, reset) {
       if (loading || playing || dragId) throw Error("Finish the current edit before rebinding.");
-      deformerPanel?.replaceParams(shapeId, id, params, "Rebind splat lattice");
+      deformerPanel?.rebindLattice(shapeId, id, params, reset);
     },
     rebindCage(shapeId, id, meshId) {
       if (loading || playing || dragId) throw Error("Finish the current edit before rebinding.");
@@ -1300,7 +1387,7 @@ async function start() {
   }
   const deformerProxy = new THREE.Object3D();
   const deformerOverlay = createSplatControlOverlay(world);
-  let overlayState: { params: unknown; kind: string; index: number; matrix: THREE.Matrix4 } | undefined;
+  let overlayState: { params: unknown; kind: string; indices: string; matrix: THREE.Matrix4 } | undefined;
   function syncDeformerOverlay(handle: ReturnType<typeof currentDeformerHandle>) {
     if (!handle || !gizmosVisible || loading || playing) {
       if (overlayState) deformerOverlay.clear();
@@ -1310,11 +1397,11 @@ async function start() {
     handle.object.mesh.updateWorldMatrix(true, false);
     const matrix = handle.object.mesh.matrixWorld;
     if (overlayState?.params === handle.params && overlayState?.kind === handle.node.kind &&
-      overlayState.index === handle.index && overlayState.matrix.equals(matrix)) return;
+      overlayState.indices === handle.indices.join(",") && overlayState.matrix.equals(matrix)) return;
     const layout = splatCageControlLayout(handle.node.kind, handle.params);
-    if (layout) deformerOverlay.update(layout, matrix, handle.index);
+    if (layout) deformerOverlay.update(layout, matrix, handle.indices);
     else deformerOverlay.clear();
-    overlayState = { params: handle.params, kind: handle.node.kind, index: handle.index, matrix: matrix.clone() };
+    overlayState = { params: handle.params, kind: handle.node.kind, indices: handle.indices.join(","), matrix: matrix.clone() };
   }
   function currentDeformerHandle() {
     const selection = deformerPanel?.selectedHandle();
@@ -1333,7 +1420,7 @@ async function start() {
   let handleDrag: ReturnType<typeof currentDeformerHandle>;
   function draggedHandleParams(session: NonNullable<typeof handleDrag>) {
     if (store.getState().document !== session.doc) throw Error("The scene changed during the deformer edit.");
-    return session.adapter.set(session.params, session.index, {
+    return transformSelectedPoints(session.adapter, session.params, session.indices, {
       position: deformerProxy.position.clone(), rotation: deformerProxy.quaternion.clone(), scale: deformerProxy.scale.clone(),
     });
   }
@@ -1347,8 +1434,8 @@ async function start() {
     if (handleDrag) return;
     transform.showX = transform.showY = transform.showZ = true;
     if (handle && !playing && !loading && gizmosVisible) {
-      const pose = handle.adapter.get(handle.params, handle.index);
-      const modes = typeof handle.adapter.modes === "function" ? handle.adapter.modes(handle.index) : handle.adapter.modes;
+      const pose = selectedPointPose(handle.adapter, handle.params, handle.indices);
+      const modes = handle.indices.length > 1 ? undefined : typeof handle.adapter.modes === "function" ? handle.adapter.modes(handle.index) : handle.adapter.modes;
       if (currentMode !== "select" && (!modes || modes.includes(currentMode))) {
         if (deformerProxy.parent !== handle.object.mesh) handle.object.mesh.add(deformerProxy);
         deformerProxy.position.copy(pose.position); deformerProxy.quaternion.copy(pose.rotation); deformerProxy.scale.copy(pose.scale);
@@ -1605,7 +1692,11 @@ async function start() {
     if(value)validateElasticity(value);
     store.setState({document:{...doc,nodes:{...doc.nodes,[id]:{...shape,elasticity:value}}},editLabel:value?"Edit Elasticity":"Remove Elasticity"});
   });
-  morphPanel = createMorphPanel(panelHost, store, { getFrame, available: () => !loading && !playing && !dragId, canKey: () => !timelinePanel?.turntable, onStatus: message => { notice.textContent = message; } });
+  morphPanel = createMorphPanel(panelHost, store, { getFrame, preflight(shape, weights) {
+    const object = runtime.get(shape.parentId);
+    if (object?.kind !== "splat" || !object.transforms) throw Error("Load the converted splats before editing blend shapes.");
+    object.transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, getFrame(), splatMorphPose(shape, weights));
+  }, available: () => !loading && !playing && !dragId, canKey: () => !timelinePanel?.turntable, onStatus: message => { notice.textContent = message; } });
   function updatePanel(preview?: TransformChannels) {
     const doc = store.getState().document,
       id = singleId();
@@ -1620,7 +1711,7 @@ async function start() {
     const emitters = new Set(Object.values(doc.nodes).filter(node => node.type === "particleShape").map(node => node.parentId));
     panel.update([...transformNodes(doc).map(node => ({ ...node, curve: curves.has(node.id), mesh: meshes.has(node.id), particle: emitters.has(node.id) })), ...jointNodes], new Set(ids), shape?.name, preview ?? (ids.length === 1 ? currentPose(ids[0]) : undefined));
     elasticityPanel.update(shape?.type === "splatShape" ? shape : undefined, new Map((doc.joints??[]).map(j=>[j.id,j.name])));
-    morphPanel?.update(shape?.type === "meshShape" ? shape : undefined);
+    morphPanel?.update(shape?.type === "meshShape" || shape?.type === "splatShape" ? shape : undefined);
     channelKeys?.refresh();
     customPanel?.refresh();
     splatMaskPanel?.refresh();
@@ -1673,6 +1764,7 @@ async function start() {
     motionImportPanel?.refresh();
   }
   function syncScene() {
+    cancelPendingTime();
     const doc = store.getState().document;
     const shapedOwners = new Set(Object.values(doc.nodes).filter(node => node.type !== "transform").map(node => node.parentId));
     for (const node of transformNodes(doc)) if (!shapedOwners.has(node.id) && !runtime.has(node.id)) {
@@ -1797,12 +1889,19 @@ async function start() {
     for (const id of assetFiles.keys())
       if (!retainedAssets.has(id)) assetFiles.delete(id);
   }
-  timelinePanel = mountTimeline(store, { getFrame, setFrame, setKey: keySelection, getSelection: animationSelection,
+  timelinePanel = mountTimeline(store, { getFrame, navigationFrame, setFrame, setKey: keySelection, getSelection: animationSelection,
     deleteDeformerKeys: () => deformerPanel?.deleteKeysAtFrame() ?? false,
     available: () => !loading && !dragId,
-    onModeChange() { setPlaying(false); clearPoseDraft(); time = timelinePanel?.turntable ? 0 : animationSettings().start / animationSettings().fps; updateTime(); },
+    onModeChange(turntable) {
+      const settings = animationSettings();
+      preflightSceneFrame(store.getState().document, settings.start);
+      setPlaying(false); clearPoseDraft();
+      timelinePanel!.setMode(turntable);
+      time = settings.start / settings.fps;
+      updateTime();
+    },
   });
-  animationEditors = mountAnimationEditors(store, { getFrame, setFrame, getSelection: animationSelection, getDrivenPoses: () => drivenPoses, onSelectTarget: selectAnimationTarget, available: () => !loading && !dragId && !playing });
+  animationEditors = mountAnimationEditors(store, { getFrame, setFrame, getSelection: animationSelection, getDrivenPoses: () => drivenPoses, onSelectTarget: selectAnimationTarget, timeMode: () => !timelinePanel?.turntable, available: () => !loading && !dragId && !playing });
   drivenPanel = createDrivenKeyPanel(store, { getFrame, getSelection: animationSelection, getPoses: () => drivenPoses,
     onEditCurve: id => { animationEditors?.focusDrivenRelationship(id); element("view-graph").click(); },
     available: () => !loading && !dragId && !playing });
@@ -1920,9 +2019,9 @@ async function start() {
   motionImportPanel = createMotionImportPanel(store, {
     available: () => !loading && !dragId && !playing,
     selectedJoint: () => skeleton.selectedIds.values().next().value,
+    preflight(stage) { preflightSceneFrame(stage.document, stage.start); },
     onImport(stage) {
-      const mode = document.querySelector<HTMLSelectElement>("select[aria-label='Playback mode']")!;
-      if (mode.value !== "animation") { mode.value = "animation"; mode.dispatchEvent(new Event("change")); }
+      timelinePanel?.setMode(false);
       selectAnimationTarget(stage.rootId);
       setFrame(stage.start);
       terminal.log(`${stage.name}: frames ${stage.start}–${stage.end} · ${stage.jointIds.length} joints`);
@@ -2008,6 +2107,7 @@ async function start() {
   }
   element("animation-set-key").addEventListener("click", keySelection);
   store.subscribe((state, previous) => {
+    if (state.document !== previous.document) skinPoseVersion++;
     if (extractionRequest && extractionRequest.document !== state.document) cancelSplatExtraction("The scene changed during splat duplication.");
     customPreviews.clear();
     const attributeDraft = customDrafts.get(state.document);
@@ -2017,7 +2117,7 @@ async function start() {
     const beforeFPS = previous.document.animation?.fps ?? 24;
     const after = state.document.animation ?? defaultAnimation();
     if (beforeFPS !== after.fps) time = time * beforeFPS / after.fps;
-    if (!timelinePanel?.turntable) time = Math.max(after.start / after.fps, Math.min(after.end / after.fps, time));
+    time = Math.max(after.start / after.fps, Math.min(after.end / after.fps, time));
     if (state.document !== previous.document) terminal.log(`${state.editLabel} · ${transformNodes(state.document).length} objects · ${state.document.joints?.length ?? 0} joints`);
     syncScene();
     queueMicrotask(collectUnusedResources);
@@ -2026,7 +2126,17 @@ async function start() {
     updateHistoryButtons();
     queueMicrotask(collectUnusedResources);
   });
+  function weightCleanupContext(shapeId: string): CleanupContext | undefined {
+    const shape = store.getState().document.nodes[shapeId], entry = bindings.get(shapeId);
+    if (!entry || shape?.type !== "splatShape" || !shape.binding) return;
+    const object = runtime.get(shape.parentId), source = entry.mesh.extSplats ?? entry.mesh.packedSplats;
+    if (!source || object?.kind !== "splat") return;
+    return { count: entry.skin.componentCount, getWeights: entry.skin.getWeights,
+      locked: new Set(shape.binding.lockedJointIds),
+      restPosition: index => object.edits && !object.edits.active(index) ? undefined : source.getSplat(index).center.toArray() as Vec3 };
+  }
   skinWeightsPanel = createSkinWeightsPanel(store, {
+    getCleanupContext: weightCleanupContext,
     getInfluenceRestMatrix: (shapeId, jointId) => {
       const shape = store.getState().document.nodes[shapeId];
       const object = shape?.parentId ? runtime.get(shape.parentId) : undefined;
@@ -2124,6 +2234,15 @@ async function start() {
   });
   splatPanel.element.querySelector(".splat-transform-fields")!.before(splatSoftPanel.element);
   workspace.registerPanel("splat-components", "Splat Components", splatPanel.element);
+  function preflightDeformerPose(doc: SceneDocument, shape: SplatShapeNode, frame: number) {
+    const object = runtime.get(shape.parentId);
+    if (object?.kind !== "splat" || !object.transforms) throw Error("Load the original splats before editing a deformer.");
+    try {
+      object.transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame, timelineSplatMorphPose(doc, shape, frame));
+    } catch (error) {
+      throw Error(`Frame ${Number(frame.toFixed(4))}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   deformerPanel = createSplatDeformerPanel(store, {
     context() {
       const context = selectedSplatMaskContext();
@@ -2153,16 +2272,15 @@ async function start() {
     available: () => !loading && !playing && !dragId && pendingComponentPick === undefined && !extractionRequest &&
       !splatPaintTool?.active && !splatMaskPaintTool?.busy,
     frame: () => timelinePanel?.turntable ? animationSettings().start : getFrame(),
-    canKey: () => !timelinePanel?.turntable,
+    canKey: () => !timelinePanel?.turntable && store.getState().document.animation?.activeLayerId === undefined,
     autoKey: () => timelinePanel?.autoKey ?? false,
     preflight(shape) {
-      const object = runtime.get(shape.parentId);
-      if (object?.kind !== "splat" || !object.transforms) throw Error("Load the original splats before editing a deformer.");
       const frame = timelinePanel?.turntable ? animationSettings().start : getFrame();
-      object.transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame);
+      preflightDeformerPose(store.getState().document, shape, frame);
     },
     onPreview() { updateBindings(); refreshGizmo(); },
     onHandleChange() { refreshGizmo(); },
+    onGraph(trackId) { animationEditors?.focusTrack(trackId); element("view-graph").click(); },
     onContextChange: refreshCageBinding,
   });
   workspace.registerPanel("splat-deformers", "Splat Deformers", deformerPanel.element);
@@ -2273,6 +2391,12 @@ async function start() {
     if (modelingPanel?.cancelTopologyPreview(true)) return;
     setPlaying(false);
     const history = store.temporal.getState();
+    const candidate = (redo ? history.futureStates : history.pastStates).at(-1)?.document;
+    const before = animationSettings(), after = candidate?.animation ?? defaultAnimation();
+    if (candidate && (before.start !== after.start || before.end !== after.end)) {
+      try { preflightSceneFrame(candidate, timelinePanel?.turntable ? after.start : Math.max(after.start, Math.min(after.end, getFrame()))); }
+      catch (error) { notice.textContent = (error as Error).message; return; }
+    }
     if (redo) history.redo();
     else history.undo();
     terminal.log(redo ? "Redo requested." : "Undo requested.");
@@ -2603,7 +2727,7 @@ async function start() {
     | { tool: "sphere" }
     | { tool: "radial" };
   let gesture:
-    { x: number; y: number; id: number; additive: boolean; subtract: boolean; component?: string; splat?: NonNullable<ReturnType<typeof splatScanSnapshot>>;
+    { x: number; y: number; id: number; additive: boolean; subtract: boolean; component?: NonNullable<ReturnType<typeof skinPickSnapshot>>; splat?: NonNullable<ReturnType<typeof splatScanSnapshot>>;
       splatPath?: SplatPointerPath;
       mesh?: { request: NonNullable<typeof meshComponentRequest>; document: SceneDocument; poseVersion: number;
         camera: THREE.Camera; world: THREE.Matrix4; projection: THREE.Matrix4; rect: DOMRect } } | undefined;
@@ -2615,13 +2739,13 @@ async function start() {
     previewSplatRadius = undefined;
     showSplatRegion();
     if (captured?.splat) refreshSplatPanel();
-    if (captured?.splat && webgl.domElement.hasPointerCapture(captured.id)) webgl.domElement.releasePointerCapture(captured.id);
+    if ((captured?.splat || captured?.component) && webgl.domElement.hasPointerCapture(captured.id)) webgl.domElement.releasePointerCapture(captured.id);
     controls.enabled = !transform.dragging;
   }
   const splatPointer = (event: PointerEvent, rect: DOMRect) => ({ x: event.clientX - rect.left, y: event.clientY - rect.top });
   const splatResizeRadius = (radius: number, delta: number) => THREE.MathUtils.clamp(Math.round(radius + delta), 1, MAX_SPLAT_BRUSH_RADIUS);
   function cancelInvalidSplatGesture() {
-    const scan = gesture?.splat;
+    const scan = gesture?.splat ?? gesture?.component;
     if (!scan?.cancelled()) return false;
     if (pendingComponentPick === scan.epoch) cancelComponentScan("Selection canceled because the scene or view changed.");
     cancelSelection();
@@ -2659,8 +2783,8 @@ async function start() {
       notice.textContent = `${ids.length.toLocaleString()} ${mode} components selected. Edit them in Mesh Tools.`;
     } catch (error) { notice.textContent = error instanceof Error ? error.message : String(error); }
   }
-  async function pickSkinComponents(start: NonNullable<typeof gesture>, event: PointerEvent) {
-    const shapeId = start.component!, entry = bindings.get(shapeId);
+  function skinPickSnapshot(shapeId: string) {
+    const entry = bindings.get(shapeId);
     if (!entry || componentPickShape !== shapeId || playing || loading || dragId) return;
     for (let parent: THREE.Object3D | null = entry.mesh; parent; parent = parent.parent) {
       if (!parent.visible) { notice.textContent = "The component object is hidden."; return; }
@@ -2671,6 +2795,7 @@ async function start() {
     const documentRef = store.getState().document, poseVersion = skinPoseVersion;
     const epoch = ++componentPickEpoch; pendingComponentPick = epoch;
     const cancelled = () => {
+      camera.updateWorldMatrix(true, false); entry.mesh.updateWorldMatrix(true, false);
       const current = webgl.domElement.getBoundingClientRect();
       return epoch !== componentPickEpoch || componentPickShape !== shapeId || playing || loading || !!dragId
         || documentRef !== store.getState().document || poseVersion !== skinPoseVersion || bindings.get(shapeId)?.skin !== entry.skin
@@ -2678,10 +2803,17 @@ async function start() {
         || !entry.mesh.matrixWorld.equals(meshWorld) || current.width !== rect.width || current.height !== rect.height
         || current.left !== rect.left || current.top !== rect.top;
     };
+    return {shapeId, entry, rect, cameraRef, meshWorld, cancelled, epoch};
+  }
+  async function pickSkinComponents(start: NonNullable<typeof gesture>, event: PointerEvent) {
+    const {shapeId, entry, rect, cameraRef, meshWorld, cancelled, epoch} = start.component!;
     notice.textContent = "Selecting components… Esc cancels.";
     let lastYield = performance.now();
     try {
-      const indices = await pickProjectedComponents({
+      if (cancelled()) throw new DOMException("Component selection canceled.", "AbortError");
+      const depth = skinWeightsPanel?.getPickDepth() ?? "through";
+      const indices = await pickSplatComponents({
+        depth, readDepth: depth === "scene-visible" ? readSceneDepth : undefined,
         componentCount: entry.skin.componentCount,
         readPositions: (offset, count) => entry.skin.getComponentPositions(Array.from({ length: count }, (_, index) => offset + index)),
         matrixWorld: meshWorld, camera: cameraRef, width: rect.width, height: rect.height,
@@ -2694,7 +2826,8 @@ async function start() {
         },
       });
       if (cancelled()) throw new DOMException("Component selection canceled.", "AbortError");
-      skinWeightsPanel?.setComponentSelection(shapeId, indices, start.subtract ? "subtract" : start.additive ? "add" : "replace");
+      if (indices.length > 20000) throw Error("Select at most 20,000 skin components.");
+      skinWeightsPanel?.setComponentSelection(shapeId, Array.from(indices), start.subtract ? "subtract" : start.additive ? "add" : "replace");
       notice.textContent = `${skinWeightsPanel?.getComponentSelection().length.toLocaleString() ?? 0} skin components selected. Edit their weights in Skin Weights.`;
     } catch (error) {
       if (epoch === componentPickEpoch) notice.textContent = (error as Error).name === "AbortError"
@@ -2708,7 +2841,7 @@ async function start() {
       const options: ComponentProjectionOptions & { depth: SplatSelectionDepth } = { componentCount: scan.context.count,
         readPositions: (offset, count) => scan.context.getPositions(Array.from({ length: count }, (_, index) => offset + index)),
         matrixWorld: scan.meshWorld, camera: scan.cameraRef, width: scan.rect.width, height: scan.rect.height,
-        depth: splatSelectionDepth, cancelled: scan.cancelled };
+        depth: splatSelectionDepth, readDepth: splatSelectionDepth === "scene-visible" ? readSceneDepth : undefined, cancelled: scan.cancelled };
       const end = splatPointer(event, scan.rect), path = start.splatPath;
       if (path?.tool === "sphere" || path?.tool === "radial") {
         const center = { x: start.x - scan.rect.left, y: start.y - scan.rect.top }, distance = Math.hypot(end.x - center.x, end.y - center.y);
@@ -2780,7 +2913,7 @@ async function start() {
     const handle = currentDeformerHandle();
     if (handle && gizmosVisible && !playing) {
       const picked = deformerOverlay.pick(camera, webgl.domElement.getBoundingClientRect(), event.clientX, event.clientY);
-      if (picked !== undefined) deformerPanel?.selectHandle(picked);
+      if (picked !== undefined) deformerPanel?.selectHandle(picked, event.shiftKey && (handle.node.kind === "lattice" || handle.node.kind === "cage"));
       return;
     }
     if (gesture?.splat || (splatComponent && currentMode !== "select")) return;
@@ -2792,13 +2925,13 @@ async function start() {
       id: event.pointerId,
       additive: event.shiftKey,
       subtract: event.ctrlKey || event.metaKey,
-      component: componentPickShape,
+      component: componentPickShape ? skinPickSnapshot(componentPickShape) : undefined,
       splat: splatComponent && !playing ? (() => { try { return splatScanSnapshot(); } catch (error) { notice.textContent = (error as Error).message; return undefined; } })() : undefined,
       mesh: meshComponentRequest ? { request: meshComponentRequest, document: store.getState().document,
         poseVersion: skinPoseVersion, camera, world: camera.matrixWorld.clone(), projection: camera.projectionMatrix.clone(),
         rect: webgl.domElement.getBoundingClientRect() } : undefined,
     };
-    if (splatComponent && !gesture.splat) { cancelSelection(); return; }
+    if (splatComponent && !gesture.splat || componentPickShape && !gesture.component) { cancelSelection(); return; }
     if (gesture.splat && splatSelectionTool !== "box") {
       const rect = gesture.splat.rect, start = splatPointer(event, rect);
       try {
@@ -2979,6 +3112,11 @@ async function start() {
   });
   // A long scan must remain cancellable even if focus moves into an editor field.
   window.addEventListener("keydown", event => {
+    if (event.key === "Escape" && pendingTime) {
+      if (playing) setPlaying(false);
+      else cancelPendingTime();
+      updateTime(false);
+    }
     if (event.key === "Escape" && extractionRequest) {
       event.preventDefault();
       cancelSplatExtraction();
@@ -3063,7 +3201,7 @@ async function start() {
     // Let focused buttons receive their native Space activation.
     if (key === " " && event.composedPath().some(target => target instanceof HTMLButtonElement)) return;
     if (key === " ") { event.preventDefault(); if (!loading && !dragId) setPlaying(!playing); return; }
-    if (key === "," || key === ".") { event.preventDefault(); setFrame(getFrame() + (key === "," ? -1 : 1)); return; }
+    if (key === "," || key === ".") { event.preventDefault(); setFrame(navigationFrame() + (key === "," ? -1 : 1)); return; }
     if (key === "delete") {
       if (loading || dragId) return;
       event.preventDefault();
@@ -3094,6 +3232,8 @@ async function start() {
     }
   });
   function setPlaying(value: boolean) {
+    cancelPendingTime();
+    playbackElapsed = 0;
     splatPaintPanel?.stopPainting();
     cancelComponentScan();
     if (value) {
@@ -3101,8 +3241,7 @@ async function start() {
       skinPaintPanel?.stopPainting();
       modelingPanel?.stopEditing();
       clearPoseDraft();
-      const settings = animationSettings();
-      if (!timelinePanel?.turntable && getFrame() >= settings.end) time = settings.start / settings.fps;
+
     }
     playing = value;
     graphPanel?.refresh();
@@ -3132,6 +3271,8 @@ async function start() {
     particlePanel?.refresh();
     channelKeys?.refresh();
     customPanel?.refresh();
+    const settings = animationSettings();
+    if (value && !timelinePanel?.turntable && getFrame() >= settings.end) requestTimelineTime(settings.start / settings.fps);
   }
   function applyAnimationPose() {
     const draggingTarget = !!selectedIKId && dragId === `ik:${selectedIKId}`;
@@ -3172,7 +3313,7 @@ async function start() {
       const node = doc.nodes[id];
       if (node?.type === "transform") applyObjectPose(object, node, pose);
       object.root.visible = !(node?.type === "transform" && node.hidden) && pose.visibility >= .5;
-      object.preview.rotation.y = timelinePanel?.turntable ? (time / duration) * Math.PI * 2 : 0;
+      object.preview.rotation.y = timelinePanel?.turntable ? (orbitTime / duration) * Math.PI * 2 : 0;
     }
     skeleton.applyPose(evaluated);
     for (const object of runtime.values()) if (object.kind === "mesh") object.polygon.applySkin(id => skeleton.boneMatrix(id), evaluated.get(object.shape.parentId)?.morphWeights);
@@ -3186,9 +3327,9 @@ async function start() {
     timelinePanel?.refresh();
     deformerPanel?.refresh();
     const turntable = timelinePanel?.turntable;
-    timeline.value = turntable ? time : getFrame();
+    timeline.value = turntable ? orbitTime : getFrame();
     graphPanel?.refresh();
-    element<HTMLOutputElement>("time").value = turntable ? `${time.toFixed(2)} / 12.00s` : `${Math.round(getFrame())} / ${animationSettings().end}`;
+    element<HTMLOutputElement>("time").value = turntable ? `${orbitTime.toFixed(2)} / 12.00s` : `${Math.round(getFrame())} / ${animationSettings().end}`;
     updatePanel();
     animationEditors?.refresh();
     if (!playing) drivenPanel?.refresh();
@@ -3273,6 +3414,7 @@ async function start() {
     sceneHandle = handle;
     savedDocument = JSON.stringify(doc);
     store.temporal.getState().pause();
+    time = orbitTime = 0;
     store.setState({ document: doc, editLabel: "Open scene" });
     ikBakePanel?.resetScene();
     jointSettingsPanel?.resetScene();
@@ -3293,7 +3435,7 @@ async function start() {
         near: camera.near,
         far: camera.far,
       },
-      time,
+      time: timelinePanel?.turntable ? animationSettings().start / animationSettings().fps : time,
     };
   }
   function restoreEditor(editor: EditorSnapshot) {
@@ -3323,16 +3465,19 @@ async function start() {
     closeFileMenu();
     busy(true);
     try {
-      // Request the destination before asynchronous packing so browser user activation is retained.
-      const destination = await saveDestination(
-        sceneName,
-        saveAs ? undefined : sceneHandle,
-        askFilename,
-      );
+      const doc = store.getState().document;
+      const editor = editorSnapshot();
+      try {
+        for (const frame of splatArchiveFrames(animationSettings(), editor.time)) preflightSceneFrame(doc, frame);
+      } catch (error) {
+        throw Error(`${(error as Error).message} Adjust the deformer or blend shape at the reported frame before saving.`);
+      }
+      // Keep the picker within the user activation, after synchronous validation
+      // and before packing the snapshot or touching a destination file.
+      const destination = await saveDestination(sceneName, saveAs ? undefined : sceneHandle, askFilename);
       if (!destination) return;
       notice.textContent = "Saving scene…";
-      const doc = store.getState().document;
-      const bytes = await encodeProjectBlob(doc, assetFiles, editorSnapshot());
+      const bytes = await encodeProjectBlob(doc, assetFiles, editor);
       await writeScene(bytes, destination);
       sceneName = destination.name;
       sceneHandle = destination.handle;
@@ -3393,15 +3538,16 @@ async function start() {
           if (shape.componentEdits) validateSplatComponentEdits(shape.componentEdits, data.count);
           if (shape.componentTransforms) validateSplatComponentTransforms(shape.componentTransforms, data.count);
           validateShapeDeformers(shape, data.count);
+          validateSplatMorphs(shape, data.count);
           validateSplatMaskCollections(shape, data.count);
           validateSplatAppearance(shape, data.count);
           validateSplatAttributePaint(shape, data.count);
           if (shape.binding) validateSkinWeightCount(shape.binding, mesh.numSplats);
-          if (shape.deformers?.length) {
+          if (shape.deformers?.length || shape.morphSurface) {
             transforms = createSplatTransformRuntime(mesh);
             const settings = project.scene.animation ?? defaultAnimation();
-            for (const frame of new Set([0, settings.start, project.editor.time * settings.fps])) {
-              transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame);
+            for (const frame of splatArchiveFrames(settings, project.editor.time)) {
+              transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame, timelineSplatMorphPose(project.scene, shape, frame));
             }
           }
           const root = new THREE.Group(),
@@ -3552,7 +3698,7 @@ async function start() {
       store.setState({ document: added.document, editLabel: "Import object" });
       if (initial) store.temporal.getState().clear();
       selectObjects([added.id]);
-      if (timelinePanel?.turntable) time = 0;
+      if (timelinePanel?.turntable) orbitTime = 0;
       updateTime();
       fitView();
       notice.textContent = "";
@@ -3596,7 +3742,7 @@ async function start() {
       const data = await prepareSplat(candidate);
       const added = addSplat(doc, asset, `${sourceNode.name}_splats`, [0, 0, 0]);
       const node = added.document.nodes[added.id] as TransformNode;
-      Object.assign(node, { ...sourceNode, ...normalizedChannels(pose), id: added.id, hidden: false, name: uniqueName(doc, `${sourceNode.name}_splats`, sourceNode.parentId) });
+      Object.assign(node, { ...sourceNode, id: added.id, hidden: false, name: uniqueName(doc, `${sourceNode.name}_splats`, sourceNode.parentId) });
       if (moveAside && !binding) {
         const width = new THREE.Box3().setFromPoints(source.vertices.map(v => new THREE.Vector3(...v.position))).getSize(new THREE.Vector3()).x;
         const displacement = new THREE.Vector3(width * 1.5, 0, 0).applyMatrix3(new THREE.Matrix3().setFromMatrix4(objectLocalMatrix(sourceNode, pose)));
@@ -3604,11 +3750,26 @@ async function start() {
       }
       const shape = Object.values(added.document.nodes).find((n): n is SplatShapeNode => n.type === "splatShape" && n.parentId === node.id)!;
       shape.binding = binding;
-      if (doc.animation) added.document.animation = { ...doc.animation, tracks: [...doc.animation.tracks, ...doc.animation.tracks.filter(t => t.targetId === sourceNode.id && t.channel !== "visibility" && !t.channel.startsWith("morph.")).map(t => ({ ...t, id: crypto.randomUUID(), targetId: node.id, keys: t.keys.map(k => ({ ...k, id: crypto.randomUUID() })) }))] };
+      if (generated.morphSurface) { shape.morphSurface = generated.morphSurface; shape.morphTargets = generated.morphTargets; }
+      if (doc.animation) added.document.animation = { ...doc.animation, tracks: [...doc.animation.tracks, ...doc.animation.tracks.filter(t => t.targetId === sourceNode.id && ((POSE_ANIMATION_CHANNELS as readonly string[]).includes(t.channel) && t.channel !== "visibility" || !!shape.morphSurface && t.channel.startsWith("morph."))).map(t => ({ ...t, id: crypto.randomUUID(), targetId: node.id, keys: t.keys.map(k => ({ ...k, id: crypto.randomUUID() })) }))] };
       if (node.parentId) added.document.rootIds = added.document.rootIds.filter(id => id !== node.id);
+      validateScene(added.document);
+      if (doc !== store.getState().document) throw Error("The scene changed during conversion. Try again.");
       const root = new THREE.Group(), preview = new THREE.Group(), box = new THREE.Box3Helper(new THREE.Box3(), 0x999999);
       preview.add(candidate); root.add(preview); box.visible = false;
-      runtime.set(node.id, { kind: "splat", root, preview, mesh: candidate, box, assetId: asset.id, ...data });
+      const transforms = createSplatTransformRuntime(candidate);
+      try {
+        const frame = getFrame();
+        transforms.prepare(undefined, undefined, undefined, frame, timelineSplatMorphPose(added.document, shape, frame));
+      } catch (error) {
+        transforms.dispose();
+        throw error;
+      }
+      const drafts = new Map(poseOverrides), draft = drafts.get(sourceNode.id);
+      if (draft && (binding || !moveAside)) drafts.set(node.id,draft);
+      poseDrafts.capture(doc,poseOverrides);
+      poseDrafts.capture(added.document,drafts);
+      runtime.set(node.id, { kind: "splat", root, preview, mesh: candidate, box, assetId: asset.id, transforms, ...data });
       world.add(box); assetFiles.set(asset.id, file);
       store.setState({ document: added.document, editLabel: "Convert mesh to splats" });
       selectObjects([node.id]); fitView();
@@ -3628,15 +3789,16 @@ async function start() {
       await new Promise(resolve => setTimeout(resolve, 0));
       const result = await importFBX(file, store.getState().document, sidecars);
       const textured = await collectEmbeddedTextures(result.document, undefined, warning => result.warnings.push(warning));
+      const settings = textured.animation ?? defaultAnimation();
+      const destination = result.clips[0]?.start ?? Math.max(settings.start, Math.min(settings.end, getFrame()));
+      for (const frame of new Set([settings.start, destination])) preflightSceneFrame(textured, frame);
       clearPoseDraft();
+      if (result.clips.length) timelinePanel?.setMode(false);
+      // The store subscriber converts this frame into the imported FPS at publication.
+      time = destination / animationSettings().fps;
       store.setState({ document: textured, editLabel: "Import FBX" });
       if (result.objectIds.length) selectObjects(result.objectIds);
       else if (result.jointIds.length) selectAnimationTarget(result.jointIds[0]);
-      if (result.clips.length) {
-        const mode = document.querySelector<HTMLSelectElement>("select[aria-label='Playback mode']")!;
-        mode.value = "animation"; mode.dispatchEvent(new Event("change"));
-        time = result.clips[0].start / animationSettings().fps;
-      }
       updateTime(); fitView();
       message = `Imported ${file.name}: ${result.objectIds.length} meshes, ${result.jointIds.length} joints, ${result.clips.length} animation clip${result.clips.length === 1 ? "" : "s"}.`;
       for (const clip of result.clips) terminal.log(`${clip.name}: frames ${clip.start}–${clip.end}`);
@@ -3703,32 +3865,35 @@ async function start() {
   rewind.addEventListener("click", () => {
     setPlaying(false);
     clearPoseDraft();
-    time = timelinePanel?.turntable ? 0 : animationSettings().start / animationSettings().fps;
-    updateTime();
+    if (timelinePanel?.turntable) { orbitTime = 0; updateTime(); }
+    else setFrame(animationSettings().start);
   });
   timeline.addEventListener("input", () => {
-    setPlaying(false);
     if (dragId || loading) return;
-    clearPoseDraft();
-    time = timelinePanel?.turntable ? Number(timeline.value) : Math.round(Number(timeline.value)) / animationSettings().fps;
-    updateTime();
+    if (!timelinePanel?.turntable) { setFrame(Number(timeline.value)); return; }
+    setPlaying(false); clearPoseDraft();
+    orbitTime = Number(timeline.value); updateTime();
   });
   skinPaintTool = createSkinWeightPaintTool(webgl.domElement, viewport, {
+    readDepth: readSceneDepth,
     available: () => !loading && !playing && !dragId,
     showPreview: () => gizmosVisible,
     getCamera: () => camera,
     getRevision: () => skinPoseVersion,
     getContext: shapeId => {
       const entry = bindings.get(shapeId);
-      return entry ? { identity: entry.skin, mesh: entry.mesh, count: entry.skin.componentCount,
+      return entry ? { cleanup: weightCleanupContext(shapeId), identity: entry.skin, mesh: entry.mesh, count: entry.skin.componentCount,
         getWeights: entry.skin.getWeights, getPositions: entry.skin.getComponentPositions } : undefined;
     },
-    commit: (settings, values, context) => editSkinWeightValues(store, settings.shapeId, values, settings.jointId,
-      { count: context.count, getWeights: context.getWeights }),
+    commit: (settings, values, context) => {
+      if (settings.mode === "smooth") commitWeightRows(store, settings.shapeId, context, new Map(values.map(v => [String(v.index),v.row!])), "Smooth skin weights");
+      else editSkinWeightValues(store, settings.shapeId, values, settings.jointId, context);
+    },
     onBusyChange: () => skinPaintPanel?.refresh(),
     onMessage: message => { notice.textContent = message; },
   });
   splatMaskPaintTool = createSplatMaskPaintTool(webgl.domElement, viewport, {
+    readDepth: readSceneDepth,
     available: () => !loading && !playing && !dragId,
     getCamera: () => camera, getRevision: () => skinPoseVersion,
     getContext(shapeId, maskId) {
@@ -3743,6 +3908,7 @@ async function start() {
     onResize: radius => splatMaskPanel?.resize(radius),
   });
   splatPaintTool = createSplatAttributePaintTool(webgl.domElement, viewport, {
+    readDepth: readSceneDepth,
     available: () => !loading && !playing && !dragId,
     context: selectedSplatPaintContext, camera: () => camera, revision: () => skinPoseVersion,
     preview(context, value) {
@@ -3780,13 +3946,15 @@ async function start() {
     const delta = previous ? Math.min((now - previous) / 1000, 0.1) : 0;
     previous = now;
     if (playing) {
-      if (timelinePanel?.turntable) time = (time + delta) % duration;
+      if (timelinePanel?.turntable) { orbitTime = (orbitTime + delta) % duration; updateTime(); }
       else {
-        const next = advanceFrame(getFrame(), delta, animationSettings());
-        time = next.frame / animationSettings().fps;
-        if (next.stopped) setPlaying(false);
+        playbackElapsed += delta;
+        if (!pendingTime) {
+          const next = advanceFrame(getFrame(), playbackElapsed, animationSettings());
+          playbackElapsed = 0;
+          requestTimelineTime(next.frame / animationSettings().fps, next.stopped);
+        }
       }
-      updateTime();
     }
     controls.update();
     cancelInvalidSplatGesture();
@@ -3805,7 +3973,10 @@ async function start() {
       const object = runtime.get(id);
       if (object) {
         object.mesh.updateWorldMatrix(true, false);
-        const skin = playing ? [...bindings.values()].find(b => b.mesh === object.mesh)?.skin : undefined;
+        // Exact posed ellipsoid acceleration is only needed for picking. Avoid building
+        // it for a selection outline during a paused scrub on an animated character.
+        const skin = playing || (object.kind === "splat" && object.transforms?.value) ?
+          [...bindings.values()].find(b => b.mesh === object.mesh)?.skin : undefined;
         const bounds = objectBounds(object);
         object.box.box
           .copy(skin ? skin.conservativeBounds(bounds) : boundSelection(object)?.bounds ?? bounds)

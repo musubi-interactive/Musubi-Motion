@@ -1,3 +1,4 @@
+import { propertyInteraction } from "./property-interaction.ts";
 import type { SkinInfluence, SplatShapeNode } from "./scene-document.ts";
 import type { SceneStore } from "./scene-store.ts";
 
@@ -7,7 +8,9 @@ export type SkinWeightBrushSettings = {
   radius: number;
   strength: number;
   value: number;
-  mode: "replace" | "add" | "subtract";
+  mode: "replace" | "add" | "subtract" | "smooth";
+  distance?: number;
+  depth?: "through" | "front" | "scene-visible";
 };
 type Options = {
   available: () => boolean;
@@ -45,21 +48,29 @@ export function createSkinWeightPaintPanel(store: SceneStore, options: Options) 
   const summary = document.createElement("p");
   const influence = select("Paint joint influence");
   const mode = select("Paint weight mode");
-  for (const [title, value] of [["Replace", "replace"], ["Add", "add"], ["Subtract", "subtract"]]) mode.add(new Option(title, value));
+  for (const [title, value] of [["Replace", "replace"], ["Add", "add"], ["Subtract", "subtract"], ["Smooth", "smooth"]]) mode.add(new Option(title, value));
+  const depth = select("Skin brush occlusion");
+  for (const [title,id] of [["Scene visible","scene-visible"],["Front centers","front"],["Through","through"]]) depth.add(new Option(title,id));
+  const distance = number("Smoothing distance in object units", .000001, 1000000, .01);
+  distance.style.textAlign = "right";
+  distance.value = "0.1";
+  const distanceLabel = label("Neighborhood distance · object units", distance);
+  propertyInteraction(distance, () => "skin-smoothing-distance", distanceLabel);
   const value = number("Paint weight value", 0, 1, 0.01);
   const strength = number("Paint brush strength", 0, 1, 0.01);
   const radius = number("Paint brush radius in CSS pixels", 1, 256, 1);
   const modeHelp = document.createElement("p");
   const painting = document.createElement("input"); painting.type = "checkbox";
   const paintLabel = label("Paint weights in viewport", painting); paintLabel.className = "paint-check";
-  brush.append(summary, label("Joint influence", influence), label("Mode", mode), label("Value · 0 to 1", value), modeHelp,
+  brush.append(summary, label("Joint influence", influence), label("Mode", mode), label("Occlusion", depth), distanceLabel, label("Value · 0 to 1", value), modeHelp,
     label("Strength · 0 to 1", strength), label("Radius · CSS pixels", radius), paintLabel);
-  const guide = document.createElement("p"); guide.textContent = "Drag to paint X-ray component centers through the object, with smooth falloff toward the brush edge. Each component receives its maximum brush strength per stroke; repeated passes in one stroke do not accumulate. Hold Alt to orbit. Escape cancels the stroke or exits painting.";
+  const guide = document.createElement("p"); guide.textContent = "Drag to paint component centers using the selected occlusion policy, with smooth falloff toward the brush edge. Each component receives its maximum brush strength per stroke; repeated passes in one stroke do not accumulate. Hold Alt to orbit. Escape cancels the stroke or exits painting.";
   const limits = document.createElement("p"); limits.textContent = "Release to apply deformation with one undo step. During a stroke, colored points preview influence weights: blue = 0, orange = 1. Deformation updates only on release. A stroke can affect at most 20,000 original components, with at most four active influences per component. Invalid edits are rejected as a whole.";
   const status = document.createElement("p"); status.className = "paint-status"; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
   element.append(style, intro, label("Bound splat object", objects), empty, brush, status, guide, limits);
 
   let shapeId = "", selectionSignature = "", objectSignature = "", influenceSignature = "", activeSignature = "";
+  let brushDistance = .1;
   let brushValue = 1, brushStrength = 0.5, brushRadius = 32;
 
   function stopPainting() {
@@ -68,7 +79,7 @@ export function createSkinWeightPaintPanel(store: SceneStore, options: Options) 
   }
   function resetScene() {
     stopPainting(); shapeId = ""; selectionSignature = JSON.stringify(options.getSelection());
-    brushValue = 1; brushStrength = 0.5; brushRadius = 32; mode.value = "replace";
+    brushValue = 1; brushStrength = 0.5; brushRadius = 32; brushDistance = .1; mode.value = "replace";
     influenceSignature = ""; status.textContent = ""; status.dataset.error = "false"; refresh();
   }
   function run(action: () => void) {
@@ -93,11 +104,13 @@ export function createSkinWeightPaintPanel(store: SceneStore, options: Options) 
       else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); cancelled = true; input.blur(); }
     });
   }
+  numberCommit(distance, number => { brushDistance = number; });
   numberCommit(value, number => { brushValue = number; });
   numberCommit(strength, number => { brushStrength = number; });
   numberCommit(radius, number => { brushRadius = number; });
   objects.onchange = () => run(() => { stopPainting(); shapeId = objects.value; });
-  influence.onchange = mode.onchange = () => run(() => {});
+  distance.onchange = () => { if (distance.checkValidity() && distance.valueAsNumber > 0) run(() => { brushDistance = distance.valueAsNumber; }); };
+  depth.onchange = influence.onchange = mode.onchange = () => run(() => {});
   painting.onchange = () => { if (!painting.checked) stopPainting(); refresh(); };
 
   function refresh() {
@@ -119,10 +132,12 @@ export function createSkinWeightPaintPanel(store: SceneStore, options: Options) 
     objects.value = shapeId; objects.disabled = !available || !shapes.length; empty.hidden = !!shape; brush.hidden = !shape;
     // Busy may mean an active stroke. Only the owner can end that brush lifecycle.
     for (const control of [influence, mode, value, strength, radius, painting]) control.disabled = !available || !shape;
+    if (document.activeElement !== distance) distance.value = String(brushDistance);
     if (document.activeElement !== value) value.value = String(brushValue);
     if (document.activeElement !== strength) strength.value = String(brushStrength);
     if (document.activeElement !== radius) radius.value = String(brushRadius);
-    modeHelp.textContent = mode.value === "replace" ? "Replace moves the selected influence toward Value, scaled by Strength and falloff."
+    distanceLabel.hidden = mode.value !== "smooth";
+    modeHelp.textContent = mode.value === "smooth" ? "Blend toward up to eight neighboring bind-space originals. Locked influences retain their weights." : mode.value === "replace" ? "Replace moves the selected influence toward Value, scaled by Strength and falloff."
       : `${mode.value === "add" ? "Add increases" : "Subtract decreases"} the selected influence by Value × Strength × falloff. Other influences keep their proportions.`;
     if (!shape) return;
     const jointIds = shape.binding!.jointIds.filter(id => doc.joints?.some(joint => joint.id === id));
@@ -138,9 +153,11 @@ export function createSkinWeightPaintPanel(store: SceneStore, options: Options) 
     summary.textContent = ready ? `${count.toLocaleString()} original components · generated elastic fill excluded`
       : "Waiting for the binding's original component data. Empty assets have no paintable components.";
     for (const control of [influence, mode, value, strength, radius, painting]) control.disabled = !available || !ready;
+    value.disabled ||= mode.value === "smooth";
+    depth.disabled = distance.disabled = !available || !ready;
     if (!influence.value || (available && !ready)) { stopPainting(); return; }
     if (!painting.checked || !available || !ready) return;
-    const settings: SkinWeightBrushSettings = { shapeId: shape.id, jointId: influence.value, radius: brushRadius, strength: brushStrength, value: brushValue, mode: mode.value as SkinWeightBrushSettings["mode"] };
+    const settings: SkinWeightBrushSettings = { shapeId: shape.id, jointId: influence.value, radius: brushRadius, strength: brushStrength, value: brushValue, distance: brushDistance, depth: depth.value as SkinWeightBrushSettings["depth"], mode: mode.value as SkinWeightBrushSettings["mode"] };
     const signature = JSON.stringify(settings);
     if (signature !== activeSignature) { activeSignature = signature; options.onBrushMode(settings); }
   }

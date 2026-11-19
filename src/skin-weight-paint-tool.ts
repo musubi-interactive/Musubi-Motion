@@ -4,7 +4,9 @@ import { createSkinBrushIndex, createSkinBrushStroke, type SkinBrushStroke, type
 import type { SkinWeightBrushSettings } from "./skin-weight-paint-panel.ts";
 import { createSkinWeightPreview } from "./skin-weight-preview.ts";
 
+import { indexSkinNeighborhood, smoothSkinRow, sameSkinRow, type CleanupContext } from "./skin-weight-smoothing.ts";
 type Context = {
+  cleanup?: CleanupContext;
   identity: object;
   mesh: Object3D;
   count: number;
@@ -12,6 +14,7 @@ type Context = {
   getPositions: (indices: number[]) => Float32Array;
 };
 type Options = {
+  readDepth?: import("./component-picking.ts").SceneDepthReader;
   available: () => boolean;
   showPreview: () => boolean;
   getContext: (shapeId: string) => Context | undefined;
@@ -89,7 +92,10 @@ export function createSkinWeightPaintTool(canvas: HTMLCanvasElement, host: HTMLE
   function segment(active: Session, point: Point) {
     if (active.ended || !valid(active)) return;
     const pair: [Point, Point] = [active.last, point]; active.last = point;
-    if (!active.stroke) active.segments.push(pair);
+    if (!active.stroke) {
+      if (active.segments.length >= 8192) { cancel("Stroke path exceeds 8,192 segments. Use a shorter stroke."); return; }
+      active.segments.push(pair);
+    }
     else {
       try { active.stroke.addSegment(...pair); queuePreview(active); }
       catch (error) { fail(active, error); }
@@ -134,17 +140,24 @@ export function createSkinWeightPaintTool(canvas: HTMLCanvasElement, host: HTMLE
     active.segments.push([active.last, active.last]);
     options.onMessage("Preparing paint stroke… Esc cancels.");
     let lastYield = performance.now();
-    active.ready = createSkinBrushIndex({ componentCount: context.count,
+    active.ready = (async () => {
+      const cleanup = context.cleanup;
+      if (brush.mode === "smooth" && !cleanup) throw Error("Bind-space original centers are unavailable.");
+      const neighbors = brush.mode === "smooth" ? await indexSkinNeighborhood(cleanup!, brush.distance ?? .1, active.cancelled) : undefined;
+      const index = await createSkinBrushIndex({ projectedLimit: 500_000, readDepth: brush.depth === "scene-visible" ? options.readDepth : undefined, frontCenters: brush.depth === "front", componentCount: context.count,
       readPositions: (offset, count) => context.getPositions(Array.from({ length: count }, (_, index) => offset + index)),
       matrixWorld: world, camera, width: rect.width, height: rect.height, cancelled: active.cancelled,
       yieldTask: async () => { if (performance.now() - lastYield < 8) return; await new Promise<void>(resolve => setTimeout(resolve, 0)); lastYield = performance.now(); },
-    }).then(index => {
+    });
       if (!valid(active)) return;
-      active.stroke = createSkinBrushStroke(index, { ...brush,
+      active.stroke = createSkinBrushStroke(index, { ...brush, smooth: neighbors && cleanup ? (id, amount) => {
+        const row = smoothSkinRow(cleanup, neighbors, id, amount);
+        return sameSkinRow(row, cleanup.getWeights(id)) ? undefined : {index:id, weight: row.find(v => v.jointId === brush.jointId)?.weight ?? 0, row};
+      } : undefined,
         getWeight: component => context.getWeights(component).find(row => row.jointId === brush.jointId)?.weight ?? 0 });
       for (const pair of active.segments) active.stroke.addSegment(...pair);
       active.segments.length = 0; queuePreview(active);
-    }).catch(error => fail(active, error));
+    })().catch(error => fail(active, error));
   }
   async function end(event: PointerEvent) {
     const active = session;

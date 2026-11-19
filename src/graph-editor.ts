@@ -1,3 +1,4 @@
+import { deformerTrackRows } from "./splat-deformer-tracks.ts";
 import { attributeTypeLabel } from "./custom-attribute-types.ts";
 import { customAttribute } from "./custom-attributes.ts";
 import { channelLabel, isCustomChannel } from "./custom-attributes.ts";
@@ -6,7 +7,7 @@ import {
   defaultAnimation, evaluateCurve, tangentSlope, upsertTrack, deleteKeys, moveKeys,
   patchKeys, replaceTracks, copyKeys, pasteKeys,
   validateCurveKeys, scaleKeys, withTangent, insertKey, setKeys, channelsForTarget,
-  evaluateSceneAnimation, readChannel, editingTracks,
+  evaluateSceneAnimation, readChannel, editingTracks, morphChannelLabel,
 } from "./animation.ts";
 import type { AnimationTrack, CurveKey, AnimationPose } from "./animation.ts";
 import type { SceneDocument } from "./scene-document.ts";
@@ -20,6 +21,7 @@ type EditorOptions = {
   setFrame: (frame: number) => void;
   getSelection: () => string[];
   available: () => boolean;
+  timeMode?: () => boolean;
   onSelectTarget?: (id: string) => void;
   getDrivenPoses?: () => ReadonlyMap<string, AnimationPose>;
 };
@@ -79,7 +81,7 @@ export function mountAnimationEditors(store: SceneStore, options: EditorOptions)
   const sourceLabel = document.createElement("label"); sourceLabel.textContent = "Graph source";
   const sourcePicker = document.createElement("select"); sourcePicker.setAttribute("aria-label", "Graph source");
   sourcePicker.add(new Option("Time animation", "time")); sourcePicker.add(new Option("Driven keys", "driven")); sourceLabel.append(sourcePicker); sourceBar.append(sourceLabel); graph.append(sourceBar);
-  const time = mountCurveEditors(store, options, {
+  const time = mountCurveEditors(store, { ...options, available: () => options.available() && (options.timeMode?.() ?? true) }, {
     kind: "time", tracks: editingTracks,
     copy: ids => copyKeys(store.getState().document, ids), paste: (clipboard, at) => pasteKeys(store, clipboard, at),
     remove: ids => deleteKeys(store, ids), insert: (id, at) => insertKey(store, id, at), upsert: track => upsertTrack(store, track),
@@ -102,6 +104,8 @@ export function mountAnimationEditors(store: SceneStore, options: EditorOptions)
   sourcePicker.onchange = () => switchSource(sourcePicker.value as "time" | "driven");
   const layerLabel = document.createElement("span"); layerLabel.setAttribute("aria-label", "Graph animation layer"); sourceBar.append(layerLabel);
   function refresh() {
+    const previewingOrbit = options.timeMode?.() === false;
+    time.graph.inert = time.dopeSheet.inert = previewingOrbit;
     const animation = store.getState().document.animation;
     layerLabel.textContent = source === "time" ? `Layer: ${animation?.layers?.find(layer => layer.id === animation.activeLayerId)?.name ?? "Base animation"}` : "";
     time.refresh(); driven.refresh();
@@ -167,7 +171,14 @@ function mountCurveEditors<Clipboard>(store: SceneStore, options: EditorOptions,
   const objectName = (id: string) => {
     const doc = store.getState().document; return doc.nodes[id]?.name ?? doc.joints?.find(j => j.id === id)?.name ?? doc.ikHandles?.find(handle => handle.id === id)?.name ?? id;
   };
-  const channelName = (track: AnimationTrack) => track.channel === "ik.blend" ? "IK blend" : channelLabel(store.getState().document, track.targetId, track.channel) + (isCustomChannel(track.channel) ? ` (${attributeTypeLabel(customAttribute(store.getState().document, track.targetId, track.channel))})` : "");
+  function channelName(track: AnimationTrack) {
+    const doc = store.getState().document;
+    if (track.channel.startsWith("deformer.")) return deformerTrackRows(doc).get(track.id)?.label ?? track.channel;
+    if (track.channel.startsWith("morph.")) return morphChannelLabel(doc, track.targetId, track.channel);
+    if (track.channel === "ik.blend") return "IK blend";
+    const label = channelLabel(doc, track.targetId, track.channel);
+    return isCustomChannel(track.channel) ? `${label} (${attributeTypeLabel(customAttribute(doc, track.targetId, track.channel))})` : label;
+  }
   function trackLabel(track: AnimationTrack) {
     const relation = isDriven ? store.getState().document.drivenKeys?.find(item => item.id === track.id) : undefined;
     return relation ? `${objectName(relation.driver.targetId)}.${channelLabel(store.getState().document, relation.driver.targetId, relation.driver.channel)} → ${objectName(relation.driven.targetId)}.${channelLabel(store.getState().document, relation.driven.targetId, relation.driven.channel)}`
@@ -291,6 +302,9 @@ function mountCurveEditors<Clipboard>(store: SceneStore, options: EditorOptions,
     const guide = document.createElement("div"); guide.className = "animation-channel-help";
     guide.textContent = "Driver cursor only chooses where to insert or paste keys; it does not change scene time or the driver. Fractional driver values are preserved."; graph.insertBefore(guide, body);
   }
+  const showAll = !isDriven ? button(toolbar, "Show all channels", () => {
+    isolatedTrack = ""; selectedObjectsOnly = false; selectionCheckbox.checked = false; refresh();
+  }) : undefined;
   const interpolation = document.createElement("select"); interpolation.setAttribute("aria-label", "Key interpolation");
   for (const [value, label] of [["bezier", "Bezier"], ["linear", "Linear"], ["step", "Stepped"]]) interpolation.add(new Option(label, value));
   interpolation.onchange = () => edit(() => domain.patch(selected, { interpolation: interpolation.value as CurveKey["interpolation"] })); keyFields.append(interpolation);
@@ -329,6 +343,7 @@ function mountCurveEditors<Clipboard>(store: SceneStore, options: EditorOptions,
   }), "Scale selected key times around the earliest selected frame; snap to whole frames");
 
   function renderChannels() {
+    if (showAll) showAll.hidden = !isolatedTrack;
     const list = visibleTracks();
     if (!list.some(track => track.id === activeTrack)) activate(list[0]?.id ?? "");
     const focusedTrack=channelList.contains(document.activeElement)?(document.activeElement as HTMLElement).dataset.trackId:undefined;
@@ -565,14 +580,17 @@ function mountCurveEditors<Clipboard>(store: SceneStore, options: EditorOptions,
   function refresh() {
     const doc=store.getState().document,selection=options.getSelection().join("|");
     updateDriver();
+    if (lastDocument !== doc && isolatedTrack && !animation().tracks.some(t => t.id === isolatedTrack)) {
+      isolatedTrack = ""; selectedObjectsOnly = false; selectionCheckbox.checked = false;
+    }
     if(lastDocument!==doc||lastSelection!==selection){
       const existing=new Set(animation().tracks.flatMap(t=>t.keys.map(k=>k.id)));selected=new Set([...selected].filter(id=>existing.has(id)));
       lastDocument=doc;lastSelection=selection;
     }
-    const editorState=`${manualCursor}/${selection}/${selectedObjectsOnly}/${activeTrack}/${[...selected].join(",")}/${JSON.stringify(view)}/${drag?.kind ?? ""}`;
+    const editorState=`${isolatedTrack}/${manualCursor}/${selection}/${selectedObjectsOnly}/${activeTrack}/${[...selected].join(",")}/${JSON.stringify(view)}/${drag?.kind ?? ""}`;
     if(renderedDocument!==doc||lastEditorState!==editorState){
       renderChannels();updateDriver();updateFields();draw();renderedDocument=doc;
-      lastEditorState=`${manualCursor}/${selection}/${selectedObjectsOnly}/${activeTrack}/${[...selected].join(",")}/${JSON.stringify(view)}/${drag?.kind ?? ""}`;
+      lastEditorState=`${isolatedTrack}/${manualCursor}/${selection}/${selectedObjectsOnly}/${activeTrack}/${[...selected].join(",")}/${JSON.stringify(view)}/${drag?.kind ?? ""}`;
     } else {
       // Playback moves only the cursors; static curves and channel DOM are retained.
       const graphCursor=svg.querySelector(".animation-playhead"),dopeCursor=dopeSvg.querySelector(".animation-playhead");
@@ -593,7 +611,7 @@ function mountCurveEditors<Clipboard>(store: SceneStore, options: EditorOptions,
   return { graph, dopeSheet, refresh, cancelDrag, focusTrack(trackId: string) {
     const track = animation().tracks.find(item => item.id === trackId); if (!track) return;
     selectedObjectsOnly = options.getSelection().includes(track.targetId);
-    selectionCheckbox.checked = selectedObjectsOnly; activate(track.id); if (isDriven) isolatedTrack = track.id;
+    selectionCheckbox.checked = selectedObjectsOnly; activate(track.id); isolatedTrack = isDriven || track.channel.startsWith("deformer.") ? track.id : "";
     selected = new Set(track.keys.map(key => key.id)); fit(true);
   } };
 }

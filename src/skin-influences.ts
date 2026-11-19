@@ -45,6 +45,7 @@ export function addSkinInfluence(store: SceneStore, shapeId: string, jointId: st
  * an explicit replacement; this never silently chooses an unrelated joint. */
 export function removeSkinInfluence(store: SceneStore, shapeId: string, jointId: string, context: SkinWeightContext, replacementId?: string): void {
   const prepared = prepare(store, shapeId, context), { binding, overrides } = prepared;
+  if (binding.lockedJointIds?.length) throw Error("Unlock held influences before removing a bound joint.");
   const index = binding.jointIds.indexOf(jointId);
   if (index < 0) throw Error("Choose a bound joint influence to remove.");
   if (binding.jointIds.length === 1) throw Error("Cannot remove the last bound influence. Unbind the object instead.");

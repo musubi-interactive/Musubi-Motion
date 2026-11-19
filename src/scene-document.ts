@@ -18,8 +18,10 @@ export type TransformNode = TransformChannels & {
 };
 export type SkinInfluence = { jointId: string; weight: number };
 export type SkinWeights = { count: number; overrides: Record<string, SkinInfluence[]> };
-export type SkinBinding = { meshSpace?: boolean; jointIds: string[]; restMatrices: number[][]; weights?: SkinWeights };
+export type SkinBinding = { lockedJointIds?: string[]; meshSpace?: boolean; jointIds: string[]; restMatrices: number[][]; weights?: SkinWeights };
 export type SplatShapeNode = {
+  morphTargets?: { name: string; weight: number }[];
+  morphSurface?: import("./splat-morph.ts").SplatMorphSurface;
   deformers?: readonly import("./splat-deformers.ts").SplatDeformer[];
   attributePaint?: import("./splat-attribute-paint.ts").SplatAttributePaint;
   appearance?: import("./splat-appearance.ts").SplatAppearanceStack;

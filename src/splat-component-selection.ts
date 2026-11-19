@@ -6,7 +6,7 @@ export const SPLAT_HIGHLIGHT_LIMIT = 20_000;
 export type SplatSelectionIndices = readonly number[] | Uint32Array;
 export type SplatSelectionOperation = "replace" | "add" | "subtract" | "toggle";
 export type SplatSelectionIdentity = { shapeId: string; assetId: string; count: number };
-export type SplatSelectionDepth = "through" | "front-centers";
+export type SplatSelectionDepth = "through" | "front-centers" | "scene-visible";
 export type SplatSelectionRegion = (x: number, y: number) => boolean;
 
 /** Stable source indices only. Never persist renderer order, LoD or elastic fill IDs. */
@@ -70,6 +70,7 @@ export async function pickSplatComponents(options: ComponentPickOptions & { dept
 
 /** Shared stable-ID hit scan for click, box, lasso, and brush regions. */
 export async function pickSplatRegion(options: ComponentProjectionOptions & { depth: SplatSelectionDepth }, contains: SplatSelectionRegion, click?: ComponentPickPoint): Promise<Uint32Array> {
+  if (options.depth === "scene-visible" && !options.readDepth) throw Error("Scene depth is unavailable. Choose Front centers or Through.");
   let nearest = -1, distance = Infinity, depth = Infinity;
   const hits = new Uint32Array(click ? 0 : Math.min(options.componentCount, SPLAT_SELECTION_LIMIT)); let hitCount = 0; const cells = new Map<number, { index: number; depth: number; distance: number }>();
   // Bound memory independently of scene size and display resolution.

@@ -12,7 +12,7 @@ export type SplatAttributePaint = { version: 1; sourceCount: number; records: re
 export type SplatPaintSettings = Pick<SplatMaskBrush, "radius" | "falloff" | "strength" | "selectedOnly"> & {
   operation: "replace" | "erase";
   channels: "color" | "opacity" | "both";
-  depth: "front" | "through";
+  depth: "front" | "through" | "scene-visible";
   color: string;
   opacity: number;
   maskId: string | null;
@@ -28,7 +28,7 @@ export function validateSplatPaintSettings(settings: SplatPaintSettings) {
   if (!Number.isFinite(settings.radius) || settings.radius < 1 || settings.radius > 512 ||
     !unit(settings.strength) || !unit(settings.opacity) || !/^#[0-9a-f]{6}$/i.test(settings.color) ||
     !["replace", "erase"].includes(settings.operation) || !["color", "opacity", "both"].includes(settings.channels) ||
-    !["front", "through"].includes(settings.depth) || !["constant", "linear", "smooth"].includes(settings.falloff) ||
+    !["front", "through", "scene-visible"].includes(settings.depth) || !["constant", "linear", "smooth"].includes(settings.falloff) ||
     typeof settings.selectedOnly !== "boolean" || settings.maskId !== null && typeof settings.maskId !== "string")
     throw Error("Invalid paint controls. Use radius 1–512 px, an RGB color, and strength and opacity between zero and one.");
 }

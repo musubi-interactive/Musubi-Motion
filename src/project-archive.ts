@@ -1,3 +1,4 @@
+import { validateSplatMorphs } from "./splat-morph.ts";
 import { validateCustomAttributes } from "./custom-attributes.ts";
 import { validateSceneSplatAttributePaint } from "./splat-attribute-paint.ts";
 import { validateSceneSplatAppearance } from "./splat-appearance.ts";
@@ -162,6 +163,7 @@ export function validateScene(value: unknown): SceneDocument {
         fail("Unsupported rotation order or scale.");
       parents.set(key, parent as string | null);
     } else if (node.type === "splatShape") {
+      validateSplatMorphs(node as import("./scene-document.ts").SplatShapeNode);
       if (node.componentEdits !== undefined) validateSplatComponentEdits(node.componentEdits);
       if (node.componentTransforms !== undefined) {
         validateSplatComponentTransforms(node.componentTransforms);

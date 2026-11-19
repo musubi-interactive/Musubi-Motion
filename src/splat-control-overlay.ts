@@ -47,8 +47,7 @@ export function createSplatControlOverlay(world: Object3D) {
   lines.renderOrder = 100011; points.renderOrder = 100012; highlight.renderOrder = 100013;
   for (const object of [lines, points, highlight]) object.frustumCulled = false;
   group.add(lines, points, highlight);
-  const selectedPosition = new BufferAttribute(new Float32Array(3), 3).setUsage(DynamicDrawUsage);
-  selectedGeometry.setAttribute("position", selectedPosition);
+  let selectedPosition: BufferAttribute;
   const clip = new Vector4(), projection = new Matrix4();
   let lastLayout: SplatControlLayout | undefined;
   group.visible = false;
@@ -82,14 +81,25 @@ export function createSplatControlOverlay(world: Object3D) {
   }
 
   return {
-    update(layout: SplatControlLayout, matrixWorld: Matrix4, selected: number) {
+    update(layout: SplatControlLayout, matrixWorld: Matrix4, selected: number | readonly number[]) {
       updateLayout(layout);
       group.visible = layout.points.length > 0;
       group.matrix.copy(matrixWorld);
       group.matrixWorldNeedsUpdate = true;
-      const point = layout.points[selected];
-      highlight.visible = !!point;
-      if (point) { selectedPosition.setXYZ(0, point.x, point.y, point.z); selectedPosition.needsUpdate = true; }
+      const indices = typeof selected === "number" ? [selected] : selected;
+      if (!selectedPosition || selectedPosition.count < indices.length) {
+        selectedGeometry.dispose();
+        selectedPosition = new BufferAttribute(new Float32Array(Math.max(1, layout.points.length) * 3), 3).setUsage(DynamicDrawUsage);
+        selectedGeometry.setAttribute("position", selectedPosition);
+      }
+      let count = 0;
+      for (const i of indices) {
+        const point = layout.points[i];
+        if (point) selectedPosition.setXYZ(count++, point.x, point.y, point.z);
+      }
+      highlight.visible = count > 0;
+      selectedPosition.needsUpdate = true;
+      selectedGeometry.setDrawRange(0, count);
     },
     pick(camera: Camera, rect: ViewRect, clientX: number, clientY: number) {
       if (!group.visible || !lastLayout || rect.width <= 0 || rect.height <= 0) return;

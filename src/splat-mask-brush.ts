@@ -2,7 +2,7 @@ import { Line3, Vector3 } from "three";
 import type { SkinBrushIndex } from "./skin-weight-brush.ts";
 import { SPLAT_MASK_LIMITS, type SplatMaskValues } from "./splat-masks.ts";
 
-export type SplatMaskBrush = { shapeId: string; maskId: string; mode: "replace" | "add" | "erase" | "smooth"; falloff: "constant" | "linear" | "smooth"; radius: number; strength: number; value: number; selectedOnly: boolean };
+export type SplatMaskBrush = { depth?: "through" | "front" | "scene-visible"; shapeId: string; maskId: string; mode: "replace" | "add" | "erase" | "smooth"; falloff: "constant" | "linear" | "smooth"; radius: number; strength: number; value: number; selectedOnly: boolean };
 export type MaskPoint = { x: number; y: number };
 export function validateSplatMaskBrush(settings: SplatMaskBrush) {
   if (!Number.isFinite(settings.radius) || settings.radius < 1 || settings.radius > 512 || ![settings.strength, settings.value].every(v => Number.isFinite(v) && v >= 0 && v <= 1)

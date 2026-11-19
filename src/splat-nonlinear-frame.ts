@@ -139,6 +139,17 @@ export function nonlinearHandles<P extends SplatNonlinearFrame>() {
 
 export function prepareNonlinearFrame(params: SplatNonlinearFrame, deform: LocalDeformation) {
   const { position, rotation, scale } = frameTransform(params);
+  // Translation and a uniform scale leave the Jacobian basis unchanged.
+  // Most default deformer frames take this branch, including translated rigs.
+  if (rotation.x === 0 && rotation.y === 0 && rotation.z === 0 && scale.x === scale.y && scale.y === scale.z) {
+    const toLocalScale = 1 / scale.x, localPoint = new Vector3();
+    return (input: Vector3, output: Vector3, jacobian: Matrix3, influence: number): void => {
+      localPoint.copy(input).sub(position).multiplyScalar(toLocalScale);
+      if (!influence || params.highBound - params.lowBound < MIN_NONLINEAR_SPAN || !deform(localPoint, jacobian, influence)) {
+        output.copy(input); jacobian.identity();
+      } else output.copy(localPoint).multiplyScalar(scale.x).add(position);
+    };
+  }
   const toObject = new Matrix4().compose(position, rotation, scale);
   const toLocal = toObject.clone().invert();
   const linearToObject = new Matrix3().setFromMatrix4(toObject);
