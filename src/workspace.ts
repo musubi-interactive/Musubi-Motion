@@ -23,6 +23,7 @@ export function mountWorkspace(riggingContent: HTMLElement, terminalContent: HTM
   animationPanels["materials"] = "Materials";
   animationPanels["texture-graph"] = "Texture Graph";
   animationPanels["splat-appearance"] = "Splat Appearance";
+  animationPanels["splat-deformers"] = "Splat Deformers";
   animationPanels["joint-settings"] = "Joint Settings";
   animationPanels["rotation-curves"] = "Rotation Curves";
   animationPanels["animation-layers"] = "Animation Layers";
@@ -191,6 +192,7 @@ export function mountWorkspace(riggingContent: HTMLElement, terminalContent: HTM
     attributeIds.push("texture-assets");
     attributeIds.push("materials");
     attributeIds.push("splat-appearance");
+    attributeIds.push("splat-deformers");
     attributeIds.push("joint-settings");
     attributeIds.push("rotation-curves");
     attributeIds.push("animation-layers");

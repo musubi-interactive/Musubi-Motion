@@ -171,6 +171,27 @@ describe("duplicate selected original splats", () => {
     duplicateMesh.dispose();
   });
 
+  it("projects deformer membership and mask IDs while preserving handle animation", () => {
+    const { document, shape } = sceneFixture();
+    const cluster = {
+      id: "weighted", kind: "cluster", name: "Shoulder", envelope: .8, sourceCount: 5, maskId: "mask",
+      params: { pivot: [0, 1, 0], position: [1, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+      weights: [{ index: 0, weight: .3 }, { index: 3, weight: .7 }],
+      keys: [{ channel: "position.y", frame: 12, value: 2 }],
+    };
+    shape.deformers = [cluster];
+    const copy = addSplatExtraction(document, identity, chosen, 256);
+    const node = copy.shape.deformers![0];
+    expect(node).toEqual({ ...cluster, id: expect.any(String), sourceCount: 2, maskId: copy.shape.scalarMasks![0].id,
+      weights: [{ index: 1, weight: .7 }] });
+    expect(node.id).not.toBe(cluster.id);
+    expect(node.params).not.toBe(cluster.params);
+    expect(validateScene(copy.document)).toBe(copy.document);
+    const untouched = addSplatExtraction(document, identity, Uint32Array.of(1), 256);
+    expect(untouched.shape.deformers).toBeUndefined();
+    expect(validateScene(untouched.document)).toBe(untouched.document);
+  });
+
   it("undoes the scene and asset together, redoes the same identity, and round trips both bytes and binding", async () => {
     const { document } = sceneFixture();
     const source = sourceSplats(3), store = createSceneStore(document);

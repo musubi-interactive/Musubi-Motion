@@ -1,8 +1,14 @@
+import { assertSplatDeformerUndoFits, trimSplatDeformerHistory } from "./splat-deformer-panel.ts";
+import { createSplatControlOverlay, splatCageControlLayout } from "./splat-control-overlay.ts";
+import { createSplatCageBindingPanel } from "./splat-cage-binding-panel.ts";
+import { createSplatCageFromGeometry } from "./splat-cage.ts";
 import { keyCustomAttribute, editCustomAttributeValue } from "./custom-attribute-keying.ts";
 import { mountCustomAttributes } from "./custom-attributes-panel.ts";
 import { createSplatAppearancePanel } from "./splat-appearance-panel.ts";
 import { createSplatAppearanceRuntime, decodeSplatAppearanceImages, type SplatAppearanceRuntime } from "./splat-appearance-runtime.ts";
 import { validateSplatAppearance } from "./splat-appearance.ts";
+import { createSplatDeformerPanel } from "./splat-deformer-panel.ts";
+import { getSplatDeformerDefinition, validateShapeDeformers } from "./splat-deformers.ts";
 import { compileGraph, type GraphProgram, type PixelSource } from "./procedural-graph-runtime.ts";
 import { createSplatPaintPanel } from "./splat-paint-panel.ts";
 import { createSplatAttributePaintTool, type SplatPaintContext } from "./splat-attribute-paint-tool.ts";
@@ -337,6 +343,7 @@ async function start() {
   let motionImportPanel: ReturnType<typeof createMotionImportPanel> | undefined;
   let graphPanel: ReturnType<typeof createProceduralGraphPanel> | undefined;
   let appearancePanel: ReturnType<typeof createSplatAppearancePanel> | undefined;
+  let deformerPanel: ReturnType<typeof createSplatDeformerPanel> | undefined;
   const noAppearanceMasks: NonNullable<SplatShapeNode["scalarMasks"]> = [];
   const noAppearancePixels = new Map<string, PixelSource>();
   let appearanceProgram: { graph: NonNullable<SceneDocument["proceduralGraph"]>; assets: SceneDocument["textureAssets"]; plan: GraphProgram } | undefined;
@@ -452,11 +459,13 @@ async function start() {
   function setFrame(frame: number) {
     if (!Number.isFinite(frame) || loading || dragId) return;
     setPlaying(false); clearPoseDraft();
+    deformerPanel?.cancelPreview(false);
     const settings = animationSettings();
     time = Math.max(settings.start, Math.min(settings.end, Math.round(frame))) / settings.fps;
     updateTime();
   }
   function keySelection() {
+    if (deformerPanel?.keyActive()) return;
     if (splatComponent) { notice.textContent = "Return to Object mode before keying objects."; return; }
     if (loading || dragId || timelinePanel?.turntable) return;
     setPlaying(false);
@@ -762,6 +771,7 @@ async function start() {
       assertSplatTransformUndoFits(before, result.shape.componentTransforms);
       assertSplatMaskUndoFits(before, result.document);
       assertSplatPaintUndoFits(before, result.document);
+      assertSplatDeformerUndoFits(before, result.document);
       mesh = createExtractedSplatMesh(bytes);
       const data = await prepareSplat(mesh);
       checkCurrent();
@@ -772,10 +782,10 @@ async function start() {
       root.add(preview);
       const transforms = createSplatTransformRuntime(mesh);
       object = { kind: "splat", root, preview, box, mesh, ...data, assetId: result.assetId, transforms };
-      transforms.update(result.shape.componentTransforms);
+      transforms.update(result.shape.componentTransforms, result.shape.deformers, result.shape.scalarMasks, timelinePanel?.turntable ? animationSettings().start : getFrame());
       transforms.setBound(!!result.shape.binding);
+      if (transforms.value) object.transformedBounds = transforms.bounds(index => index < data.count);
       if (result.shape.binding) skin = createBinding(mesh, result.shape.binding, undefined, before.joints, transforms);
-      else if (result.shape.componentTransforms) object.transformedBounds = transforms.bounds(index => index < data.count);
       const file = new File([bytes], SPLAT_EXTRACTION_NAME);
       checkCurrent();
 
@@ -793,6 +803,7 @@ async function start() {
       trimSplatTransformHistory(store);
       trimSplatMaskHistory(store);
       trimSplatPaintHistory(store);
+      trimSplatDeformerHistory(store);
       selectObjects([result.id]);
       notice.textContent = `Duplicated ${indices.length.toLocaleString()} selected splats into a new object.`;
     } catch (error) {
@@ -826,6 +837,7 @@ async function start() {
     splatPanel?.update(context?.shape.name, splatComponentIds.length, context?.activeCount ?? 0, activity, available,
       splatSelectionTool, previewSplatRadius === undefined ? splatBrush : { ...splatBrush, radius: previewSplatRadius },
       { hidden: context?.hidden ?? 0, deleted: context?.deleted ?? 0 }, canDuplicate, duplicating);
+    deformerPanel?.refresh();
   }
   function changeSplatTool(tool: SplatSelectionTool) {
     if (splatSelectionTool === tool) return;
@@ -1050,8 +1062,15 @@ async function start() {
       const transforms = object.transforms ??= createSplatTransformRuntime(object.mesh);
       if (splatTransformPreview && splatTransformPreview.document !== doc) splatTransformPreview = undefined;
       const transformValue = splatTransformPreview?.shapeId === shape.id ? splatTransformPreview.value : shape.componentTransforms;
-      const transformChanged = transforms.value !== transformValue, editChanged = object.edits?.value !== shape.componentEdits;
-      transforms.update(transformValue);
+      const editChanged = object.edits?.value !== shape.componentEdits;
+      const frame = timelinePanel?.turntable ? animationSettings().start : getFrame();
+      let transformChanged = false;
+      try {
+        transformChanged = transforms.update(transformValue, deformerPanel?.deformersForShape(shape) ?? shape.deformers, shape.scalarMasks, frame);
+      } catch (error) {
+        notice.textContent = (error as Error).message;
+        transformChanged = transforms.update(transformValue);
+      }
       transforms.setBound(!!shape.binding);
       if (object.edits?.value !== shape.componentEdits) {
         if (!shape.componentEdits) { object.edits?.mask.dispose(); object.edits = undefined; }
@@ -1069,7 +1088,7 @@ async function start() {
           }
         }
       }
-      if (!shape.binding && (transformChanged || editChanged)) object.transformedBounds = transformValue ? transforms.bounds(index => index < object.count && (!object.edits || object.edits.active(index))) : undefined;
+      if (transformChanged || editChanged) object.transformedBounds = transforms.value ? transforms.bounds(index => index < object.count && (!object.edits || object.edits.active(index))) : undefined;
       if (!shape.binding) {
         applySplatPaintRuntime(shape, object, shape.attributePaint);
         continue;
@@ -1159,7 +1178,7 @@ async function start() {
       if (meshComponentRequest && !modelingPanel?.element.checkVisibility()) modelingPanel?.stopEditing();
       controls.enabled = event.pointerType === "touch" || event.altKey;
       transform.enabled =
-        (!splatComponent || transform.object === splatComponentProxy) && !componentPickShape && !paintSettings && (!meshComponentRequest || transform.object === meshComponentProxy) &&
+        (!splatComponent || transform.object === splatComponentProxy || transform.object === deformerProxy) && !componentPickShape && !paintSettings && (!meshComponentRequest || transform.object === meshComponentProxy) &&
         gizmosVisible && (!skeleton.selectedId || jointsVisible) &&
         !event.altKey &&
         (selectedIKId ? jointsVisible && currentMode === "translate" : (selected.size === 1 || !!skeleton.selectedId) && currentMode !== "select") &&
@@ -1246,11 +1265,104 @@ async function start() {
   function singleId() {
     return selected.size === 1 ? selected.values().next().value : undefined;
   }
+  // Keep the proxy in the same object-local space as the authored rest handles.
+  const cageBindingPanel = createSplatCageBindingPanel({
+    rebindLattice(shapeId, id, params) {
+      if (loading || playing || dragId) throw Error("Finish the current edit before rebinding.");
+      deformerPanel?.replaceParams(shapeId, id, params, "Rebind splat lattice");
+    },
+    rebindCage(shapeId, id, meshId) {
+      if (loading || playing || dragId) throw Error("Finish the current edit before rebinding.");
+      const shape = store.getState().document.nodes[shapeId];
+      const target = shape?.type === "splatShape" && runtime.get(shape.parentId);
+      const source = runtime.get(meshId);
+      if (!target || target.kind !== "splat" || source?.kind !== "mesh") throw Error("Choose a loaded polygon mesh.");
+      target.mesh.updateWorldMatrix(true, false);
+      source.mesh.updateWorldMatrix(true, false);
+      const matrix = target.mesh.matrixWorld.clone();
+      if (Math.abs(matrix.determinant()) < 1e-12) throw Error("The splat object needs an invertible world transform.");
+      const params = createSplatCageFromGeometry(source.mesh.geometry, matrix.invert().multiply(source.mesh.matrixWorld));
+      deformerPanel?.replaceParams(shapeId, id, params, "Bind splats to polygon cage");
+    },
+  });
+  function refreshCageBinding() {
+    if (!deformerPanel) return;
+    if (cageBindingPanel.element.parentElement !== deformerPanel.bindingPanelHost)
+      deformerPanel.bindingPanelHost.append(cageBindingPanel.element);
+    const selectedEntry = deformerPanel.selectedEntry();
+    const meshes: { id: string; name: string }[] = [];
+    if (selectedEntry?.entry.kind === "cage") {
+      const nodes = store.getState().document.nodes;
+      for (const [id, source] of runtime) if (source.kind === "mesh" && nodes[id]) meshes.push({ id, name: nodes[id].name });
+    }
+    cageBindingPanel.update(selectedEntry && { shapeId: selectedEntry.shapeId, id: selectedEntry.entry.id,
+      kind: selectedEntry.entry.kind, params: selectedEntry.entry.params, meshes });
+  }
+  const deformerProxy = new THREE.Object3D();
+  const deformerOverlay = createSplatControlOverlay(world);
+  let overlayState: { params: unknown; kind: string; index: number; matrix: THREE.Matrix4 } | undefined;
+  function syncDeformerOverlay(handle: ReturnType<typeof currentDeformerHandle>) {
+    if (!handle || !gizmosVisible || loading || playing) {
+      if (overlayState) deformerOverlay.clear();
+      overlayState = undefined;
+      return;
+    }
+    handle.object.mesh.updateWorldMatrix(true, false);
+    const matrix = handle.object.mesh.matrixWorld;
+    if (overlayState?.params === handle.params && overlayState?.kind === handle.node.kind &&
+      overlayState.index === handle.index && overlayState.matrix.equals(matrix)) return;
+    const layout = splatCageControlLayout(handle.node.kind, handle.params);
+    if (layout) deformerOverlay.update(layout, matrix, handle.index);
+    else deformerOverlay.clear();
+    overlayState = { params: handle.params, kind: handle.node.kind, index: handle.index, matrix: matrix.clone() };
+  }
+  function currentDeformerHandle() {
+    const selection = deformerPanel?.selectedHandle();
+    if (!selection || !deformerPanel) return;
+    const doc = store.getState().document;
+    const shape = doc.nodes[selection.shapeId];
+    if (shape?.type !== "splatShape") return;
+    const node = shape.deformers?.find(entry => entry.id === selection.id);
+    const object = runtime.get(shape.parentId);
+    if (!node || object?.kind !== "splat") return;
+    const adapter = getSplatDeformerDefinition(node.kind)?.handle;
+    const params = deformerPanel.paramsForHandle(shape.id, node.id);
+    if (!adapter || !params || selection.index < 0 || selection.index >= adapter.count(params)) return;
+    return { ...selection, doc, node, object, adapter, params };
+  }
+  let handleDrag: ReturnType<typeof currentDeformerHandle>;
+  function draggedHandleParams(session: NonNullable<typeof handleDrag>) {
+    if (store.getState().document !== session.doc) throw Error("The scene changed during the deformer edit.");
+    return session.adapter.set(session.params, session.index, {
+      position: deformerProxy.position.clone(), rotation: deformerProxy.quaternion.clone(), scale: deformerProxy.scale.clone(),
+    });
+  }
   function refreshGizmo() {
     if (meshTopologyPreview) { transform.detach(); transform.enabled = false; transform.getHelper().visible = false; return; }
     if (splatMaskPaintTool?.active || splatPaintTool?.active) { transform.detach(); transform.enabled = false; transform.getHelper().visible = false; return; }
     orientationControl.disabled = !!dragId || loading || playing || !!meshComponentRequest || !!skeleton.selectedIds.size || !!selectedIKId || !singleId();
     if (meshDrag || objectDrag || splatDrag) return;
+    const handle = currentDeformerHandle();
+    syncDeformerOverlay(handle);
+    if (handleDrag) return;
+    transform.showX = transform.showY = transform.showZ = true;
+    if (handle && !playing && !loading && gizmosVisible) {
+      const pose = handle.adapter.get(handle.params, handle.index);
+      const modes = typeof handle.adapter.modes === "function" ? handle.adapter.modes(handle.index) : handle.adapter.modes;
+      if (currentMode !== "select" && (!modes || modes.includes(currentMode))) {
+        if (deformerProxy.parent !== handle.object.mesh) handle.object.mesh.add(deformerProxy);
+        deformerProxy.position.copy(pose.position); deformerProxy.quaternion.copy(pose.rotation); deformerProxy.scale.copy(pose.scale);
+        deformerProxy.updateWorldMatrix(true, false);
+        const axis = handle.adapter.localAxis?.(handle.index);
+        transform.showX = !axis || axis === "x";
+        transform.showY = !axis || axis === "y";
+        transform.showZ = !axis || axis === "z";
+        transform.setSpace(axis || objectOrientation === "object" ? "local" : "world"); transform.setMode(currentMode);
+        if (transform.object !== deformerProxy) transform.attach(deformerProxy);
+        transform.enabled = true; transform.getHelper().visible = true; return;
+      }
+      transform.detach(); transform.enabled = false; return;
+    }
     if (splatComponent) {
       const context = splatContext();
       if (context && currentMode !== "select" && splatComponentIds.length && !loading && !playing && gizmosVisible) {
@@ -1556,6 +1668,7 @@ async function start() {
     modelingPanel?.refresh();
     particlePanel?.refresh();
     appearancePanel?.refresh();
+    deformerPanel?.refresh();
     materialPanel?.refresh();
     motionImportPanel?.refresh();
   }
@@ -1685,6 +1798,7 @@ async function start() {
       if (!retainedAssets.has(id)) assetFiles.delete(id);
   }
   timelinePanel = mountTimeline(store, { getFrame, setFrame, setKey: keySelection, getSelection: animationSelection,
+    deleteDeformerKeys: () => deformerPanel?.deleteKeysAtFrame() ?? false,
     available: () => !loading && !dragId,
     onModeChange() { setPlaying(false); clearPoseDraft(); time = timelinePanel?.turntable ? 0 : animationSettings().start / animationSettings().fps; updateTime(); },
   });
@@ -2010,6 +2124,57 @@ async function start() {
   });
   splatPanel.element.querySelector(".splat-transform-fields")!.before(splatSoftPanel.element);
   workspace.registerPanel("splat-components", "Splat Components", splatPanel.element);
+  deformerPanel = createSplatDeformerPanel(store, {
+    context() {
+      const context = selectedSplatMaskContext();
+      if (!context) return;
+      const { shape, object, identity, selected } = context;
+      return {
+        shape, count: identity.count, componentMode: splatComponent?.shapeId === shape.id, indices: selected,
+        weights: splatComponentWeights,
+        restBounds(indices) {
+          const bounds = new THREE.Box3(), source = object.mesh.extSplats ?? object.mesh.packedSplats;
+          if (!source) return bounds;
+          if (!indices && !object.transforms?.value && !object.edits) return object.bounds.clone();
+          const center = new THREE.Vector3();
+          const expand = (index: number, position: THREE.Vector3) => {
+            if (index >= identity.count || (object.edits && !object.edits.active(index))) return;
+            center.copy(position);
+            const affine = object.transforms?.affine(index);
+            if (affine) center.applyMatrix4(affine);
+            bounds.expandByPoint(center);
+          };
+          if (indices) for (const index of indices) expand(index, source.getSplat(index).center);
+          else source.forEachSplat(expand);
+          return bounds;
+        },
+      };
+    },
+    available: () => !loading && !playing && !dragId && pendingComponentPick === undefined && !extractionRequest &&
+      !splatPaintTool?.active && !splatMaskPaintTool?.busy,
+    frame: () => timelinePanel?.turntable ? animationSettings().start : getFrame(),
+    canKey: () => !timelinePanel?.turntable,
+    autoKey: () => timelinePanel?.autoKey ?? false,
+    preflight(shape) {
+      const object = runtime.get(shape.parentId);
+      if (object?.kind !== "splat" || !object.transforms) throw Error("Load the original splats before editing a deformer.");
+      const frame = timelinePanel?.turntable ? animationSettings().start : getFrame();
+      object.transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame);
+    },
+    onPreview() { updateBindings(); refreshGizmo(); },
+    onHandleChange() { refreshGizmo(); },
+    onContextChange: refreshCageBinding,
+  });
+  workspace.registerPanel("splat-deformers", "Splat Deformers", deformerPanel.element);
+  refreshCageBinding();
+  new ResizeObserver(() => {
+    if (!deformerPanel?.element.checkVisibility()) deformerPanel?.stopEditing();
+    refreshGizmo();
+  }).observe(deformerPanel.element);
+  element("create-splat-cluster").addEventListener("click", () => {
+    element("view-splat-deformers").click();
+    deformerPanel?.create("cluster");
+  });
   splatMaskPanel = createSplatMaskPanel(store, {
     available: () => !loading && !playing && !dragId,
     busy: () => !!splatMaskPaintTool?.busy,
@@ -2127,6 +2292,13 @@ async function start() {
     controls.enabled = !event.value;
     if (event.value) {
       orientationControl.disabled = true;
+      if (transform.object === deformerProxy) {
+        handleDrag = currentDeformerHandle();
+        if (!handleDrag) { transform.pointerUp(null); refreshGizmo(); return; }
+        dragId = "deformer:" + handleDrag.id;
+        cancelDrag = false;
+        setPlaying(false); updateHistoryButtons(); return;
+      }
       if (splatComponent && transform.object === splatComponentProxy) {
         try { splatDrag = beginSplatTransform(currentMode === "select" ? "translate" : currentMode, true); dragId = `splats:${splatComponent.shapeId}`; }
         catch (error) { notice.textContent = (error as Error).message; transform.pointerUp(null); refreshGizmo(); return; }
@@ -2154,6 +2326,15 @@ async function start() {
       setPlaying(false);
     } else if (dragId) {
       const id = dragId;
+      if (handleDrag) {
+        const session = handleDrag;
+        handleDrag = undefined; dragId = undefined;
+        try {
+          if (cancelDrag) deformerPanel?.cancelPreview();
+          else deformerPanel?.commitParams(session.shapeId, session.id, draggedHandleParams(session), "Transform deformer handle");
+        } catch (error) { deformerPanel?.cancelPreview(); notice.textContent = (error as Error).message; }
+        refreshGizmo(); updateHistoryButtons(); return;
+      }
       if (splatDrag) {
         const session = splatDrag;
         splatComponentProxy.updateMatrixWorld(true);
@@ -2233,6 +2414,13 @@ async function start() {
     updateHistoryButtons();
   });
   transform.addEventListener("objectChange", () => {
+    if (handleDrag) {
+      if (!cancelDrag) {
+        try { deformerPanel?.previewParams(handleDrag.shapeId, handleDrag.id, draggedHandleParams(handleDrag)); }
+        catch (error) { notice.textContent = (error as Error).message; abortDrag(); }
+      }
+      return;
+    }
     if (splatDrag) {
       if (cancelDrag) return;
       try { splatComponentProxy.updateMatrixWorld(true); previewSplatTransform(splatDrag, splatComponentProxy.matrixWorld.clone().multiply(splatDrag.startInverse)); }
@@ -2589,6 +2777,12 @@ async function start() {
       if (gesture?.splat && (event.altKey || event.pointerType === "touch")) { cancelComponentScan(); cancelSelection(); }
       return;
     }
+    const handle = currentDeformerHandle();
+    if (handle && gizmosVisible && !playing) {
+      const picked = deformerOverlay.pick(camera, webgl.domElement.getBoundingClientRect(), event.clientX, event.clientY);
+      if (picked !== undefined) deformerPanel?.selectHandle(picked);
+      return;
+    }
     if (gesture?.splat || (splatComponent && currentMode !== "select")) return;
     cancelComponentScan();
     camera.updateMatrixWorld(true);
@@ -2814,7 +3008,7 @@ async function start() {
     )
       return;
     const key = event.key.toLowerCase();
-    if (key === "escape" && splatDrag) { event.preventDefault(); abortDrag(); return; }
+    if (key === "escape" && (splatDrag || handleDrag)) { event.preventDefault(); abortDrag(); return; }
     if (key === "escape" && splatComponent) { event.preventDefault(); cancelComponentScan(); cancelSelection(); return; }
     if (key === "escape" && meshDrag) { event.preventDefault(); abortDrag(); return; }
     if (key === "escape" && modelingPanel?.cancelTopologyPreview(true)) { event.preventDefault(); return; }
@@ -2903,6 +3097,7 @@ async function start() {
     splatPaintPanel?.stopPainting();
     cancelComponentScan();
     if (value) {
+      deformerPanel?.cancelPreview(false);
       skinPaintPanel?.stopPainting();
       modelingPanel?.stopEditing();
       clearPoseDraft();
@@ -2912,6 +3107,7 @@ async function start() {
     playing = value;
     graphPanel?.refresh();
     appearancePanel?.refresh();
+    deformerPanel?.refresh();
     materialPanel?.refresh();
     motionImportPanel?.refresh();
     updateSplatPreview();
@@ -2988,6 +3184,7 @@ async function start() {
     if (meshComponentRequest) refreshGizmo();
     updateParticles();
     timelinePanel?.refresh();
+    deformerPanel?.refresh();
     const turntable = timelinePanel?.turntable;
     timeline.value = turntable ? time : getFrame();
     graphPanel?.refresh();
@@ -3027,6 +3224,7 @@ async function start() {
     if (value) ikPanel?.cancelPreview();
     loading = value;
     if (value) {
+      deformerPanel?.stopEditing();
       skinPaintPanel?.stopPainting();
       modelingPanel?.stopEditing();
       setPlaying(false);
@@ -3189,14 +3387,23 @@ async function start() {
                 fileBytes: await project.files.get(asset.id)!.arrayBuffer(),
                 fileName: asset.fileName,
               });
+        let transforms: SplatTransformRuntime | undefined;
         try {
           const data = await prepareSplat(mesh);
           if (shape.componentEdits) validateSplatComponentEdits(shape.componentEdits, data.count);
           if (shape.componentTransforms) validateSplatComponentTransforms(shape.componentTransforms, data.count);
+          validateShapeDeformers(shape, data.count);
           validateSplatMaskCollections(shape, data.count);
           validateSplatAppearance(shape, data.count);
           validateSplatAttributePaint(shape, data.count);
           if (shape.binding) validateSkinWeightCount(shape.binding, mesh.numSplats);
+          if (shape.deformers?.length) {
+            transforms = createSplatTransformRuntime(mesh);
+            const settings = project.scene.animation ?? defaultAnimation();
+            for (const frame of new Set([0, settings.start, project.editor.time * settings.fps])) {
+              transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame);
+            }
+          }
           const root = new THREE.Group(),
             preview = new THREE.Group(),
             box = new THREE.Box3Helper(new THREE.Box3(), 0x999999);
@@ -3211,8 +3418,10 @@ async function start() {
             mesh,
             box,
             assetId: asset.id,
+            transforms,
           });
         } catch (error) {
+          transforms?.dispose();
           mesh.dispose();
           throw error;
         }

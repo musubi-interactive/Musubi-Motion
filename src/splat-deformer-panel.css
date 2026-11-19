@@ -1,0 +1,32 @@
+.splat-deformer-panel {
+  height: 100%;
+  overflow: auto;
+  padding: 12px;
+  color: var(--text);
+  background: var(--panel);
+  font-size: 12px;
+}
+
+.splat-deformer-panel p { color: var(--muted); margin: 8px 0; }
+.splat-deformer-panel button,
+.splat-deformer-panel select,
+.splat-deformer-panel input[type="number"] {
+  min-width: 0;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text);
+  background: var(--bg);
+  font: inherit;
+}
+.splat-deformer-panel input[type="number"] { width: 100%; text-align: right; }
+.splat-deformer-panel :disabled { opacity: .5; }
+.splat-deformer-panel :focus-visible { outline: 1px solid var(--strong); }
+.splat-deformer-panel button:not(:disabled) { cursor: pointer; }
+.splat-deformer-panel button:hover:not(:disabled) { background: var(--hover); }
+.splat-deformer-panel fieldset { display: grid; gap: 6px; min-width: 0; padding: 8px; margin: 0; border: 1px solid var(--line); }
+.splat-deformer-panel label { display: grid; grid-template-columns: 1fr minmax(5em, 45%); align-items: center; gap: 6px; min-width: 0; }
+.splat-deformer-panel label:has(input[type="checkbox"]) { display: flex; }
+.splat-deformer-create { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
+.splat-deformer-tools { display: flex; flex-wrap: wrap; gap: 4px; }
+.splat-deformer-control { display: grid; grid-template-columns: 1fr 2.4em; gap: 4px; }
