@@ -37,6 +37,16 @@ export class ParticleCheckpointCache {
     this.totalBytes += bytes;
   }
 
+  /** Publish a completed range in step order under the same FIFO budget. */
+  publishPrewarm(owner: symbol, staged: readonly ParticleCheckpoint[]): number {
+    for (const checkpoint of staged) {
+      const previous = this.find(owner, checkpoint.step);
+      if (previous?.step === checkpoint.step) this.remove(previous);
+      this.add(owner, checkpoint);
+    }
+    return staged.filter(checkpoint => this.find(owner, checkpoint.step) === checkpoint).length;
+  }
+
   clear(owner: symbol): void {
     for (const [checkpoint, entry] of this.entries) if (entry.owner === owner) this.remove(checkpoint);
   }
