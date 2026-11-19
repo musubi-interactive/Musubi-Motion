@@ -424,7 +424,7 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
     },
     keyActive() {
       const target = authored(shapeId, id);
-      if (!target || !options.available() || !options.canKey() || !element.getClientRects().length) return false;
+      if (!target || !selectedHandle() || !options.available() || !options.canKey()) return false;
       run(() => {
         const frame = Math.round(options.frame()), sampled = sampleSplatDeformer(target.entry, options.frame());
         const controls = splatDeformerControls(sampled, index).filter(control => !control.toggle);
@@ -436,9 +436,10 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
     },
     deleteKeysAtFrame() {
       const target = authored(shapeId, id);
-      if (!target || !options.available() || !options.canKey() || !element.getClientRects().length) return false;
+      if (!target || !selectedHandle() || !options.available() || !options.canKey()) return false;
       const frame = Math.round(options.frame());
-      const keys = target.entry.keys?.filter(key => key.frame !== frame);
+      const channels = new Set(splatDeformerControls(target.entry, index).map(control => control.id));
+      const keys = target.entry.keys?.filter(key => key.frame !== frame || !channels.has(key.channel));
       if (keys?.length !== target.entry.keys?.length) run(() => change(target.shape, { ...target.entry, keys }, "Delete deformer keys"));
       return true;
     },
