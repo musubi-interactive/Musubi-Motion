@@ -1,13 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { Box3 } from "three";
+import { setAnimationSettings } from "../src/animation.ts";
+import { createSceneStore } from "../src/scene-store.ts";
 import { makeDemo, prepareSplat } from "../src/splat-assets.ts";
 import { addSplat, emptyScene, type SplatShapeNode } from "../src/scene-document.ts";
 import { getSplatDeformerDefinition, type SplatDeformer } from "../src/splat-deformers.ts";
 import { latticeRestPoint, resizeSplatLattice } from "../src/splat-lattice.ts";
 import { createSplatTransformRuntime } from "../src/splat-transform-runtime.ts";
-import { stageSplatTimelineFrame, type SplatFrameJob } from "../src/splat-timeline.ts";
+import { splatArchiveFrames, stageSplatTimelineFrame, type SplatFrameJob } from "../src/splat-timeline.ts";
 
 describe("atomic splat timeline changes", () => {
+  it("preflights the same frame set for storing and restoring bounded legacy timestamps", () => {
+    expect([...splatArchiveFrames({ start: 8, end: 24, fps: 24 }, 2)]).toEqual([0, 8, 48, 24]);
+    expect([...splatArchiveFrames({ start: 0, end: 24, fps: 24 }, .5)]).toEqual([0, 12]);
+  });
+
   it("holds every displayed shape and the current time when a sparse intermediate pose collapses", async () => {
     const meshes = [makeDemo(), makeDemo()];
     const [{ count }] = await Promise.all(meshes.map(mesh => prepareSplat(mesh)));
@@ -34,6 +41,11 @@ describe("atomic splat timeline changes", () => {
         const shape = Object.values(doc.nodes).find((n): n is SplatShapeNode => n.type === "splatShape" && n.assetId === "a"+i)!;
         shape.deformers = [entry]; return { shape, transforms: runtimes[i], visits: 1 };
       });
+      const rangeStore = createSceneStore(doc, (_doc, _shape, probes) => {
+        if (probes.edited.has(3)) throw Error("Invalid new range start");
+      });
+      expect(() => setAnimationSettings(rangeStore, { start: 3 })).toThrow(/range start/);
+      expect(rangeStore.getState().document).toBe(doc);
       let displayed = -1;
       const seek = (frame: number) => stageSplatTimelineFrame(jobs, frame, new AbortController().signal, () => {
         for (const { transforms, shape } of jobs) transforms.update(undefined, shape.deformers, undefined, frame);

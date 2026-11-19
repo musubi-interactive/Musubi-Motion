@@ -6,7 +6,7 @@ import { icon } from "./ui.ts";
 
 export function mountTimeline(store: SceneStore, options: {
   getFrame(): number; navigationFrame(): number; setFrame(frame: number): void; setKey(): void;
-  getSelection(): string[]; available(): boolean; onModeChange(): void;
+  getSelection(): string[]; available(): boolean; onModeChange(turntable: boolean): void;
   deleteDeformerKeys?(): boolean;
 }) {
   const host = document.getElementById("timeline-panel")!;
@@ -69,7 +69,16 @@ export function mountTimeline(store: SceneStore, options: {
     const doc = store.getState().document;
     return editingTracks(doc).filter(track => selection.has(track.targetId)).flatMap(track => track.keys.map(key => key.time));
   }
-  mode.onchange = () => run(options.onModeChange);
+  let turntableMode = false;
+  function setMode(turntable: boolean) {
+    turntableMode = turntable;
+    mode.value = turntable ? "turntable" : "animation";
+  }
+  mode.onchange = () => {
+    const proposed = mode.value === "turntable";
+    setMode(turntableMode);
+    run(() => options.onModeChange(proposed));
+  };
   tools.querySelector<HTMLButtonElement>('[data-action="key"]')!.onclick = () => run(options.setKey);
   tools.querySelector<HTMLButtonElement>('[data-action="delete"]')!.onclick = () => run(() => {
     if (options.deleteDeformerKeys?.()) return;
@@ -135,5 +144,5 @@ export function mountTimeline(store: SceneStore, options: {
       }
     }
   }
-  return { refresh, get autoKey() { return get("auto").checked && mode.value === "animation"; }, get turntable() { return mode.value === "turntable"; } };
+  return { refresh, setMode, get autoKey() { return get("auto").checked && mode.value === "animation"; }, get turntable() { return mode.value === "turntable"; } };
 }

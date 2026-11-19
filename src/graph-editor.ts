@@ -21,6 +21,7 @@ type EditorOptions = {
   setFrame: (frame: number) => void;
   getSelection: () => string[];
   available: () => boolean;
+  timeMode?: () => boolean;
   onSelectTarget?: (id: string) => void;
   getDrivenPoses?: () => ReadonlyMap<string, AnimationPose>;
 };
@@ -80,7 +81,7 @@ export function mountAnimationEditors(store: SceneStore, options: EditorOptions)
   const sourceLabel = document.createElement("label"); sourceLabel.textContent = "Graph source";
   const sourcePicker = document.createElement("select"); sourcePicker.setAttribute("aria-label", "Graph source");
   sourcePicker.add(new Option("Time animation", "time")); sourcePicker.add(new Option("Driven keys", "driven")); sourceLabel.append(sourcePicker); sourceBar.append(sourceLabel); graph.append(sourceBar);
-  const time = mountCurveEditors(store, options, {
+  const time = mountCurveEditors(store, { ...options, available: () => options.available() && (options.timeMode?.() ?? true) }, {
     kind: "time", tracks: editingTracks,
     copy: ids => copyKeys(store.getState().document, ids), paste: (clipboard, at) => pasteKeys(store, clipboard, at),
     remove: ids => deleteKeys(store, ids), insert: (id, at) => insertKey(store, id, at), upsert: track => upsertTrack(store, track),
@@ -103,6 +104,8 @@ export function mountAnimationEditors(store: SceneStore, options: EditorOptions)
   sourcePicker.onchange = () => switchSource(sourcePicker.value as "time" | "driven");
   const layerLabel = document.createElement("span"); layerLabel.setAttribute("aria-label", "Graph animation layer"); sourceBar.append(layerLabel);
   function refresh() {
+    const previewingOrbit = options.timeMode?.() === false;
+    time.graph.inert = time.dopeSheet.inert = previewingOrbit;
     const animation = store.getState().document.animation;
     layerLabel.textContent = source === "time" ? `Layer: ${animation?.layers?.find(layer => layer.id === animation.activeLayerId)?.name ?? "Base animation"}` : "";
     time.refresh(); driven.refresh();

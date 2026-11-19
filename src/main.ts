@@ -119,7 +119,7 @@ import { validateSkinWeightCount, editSkinWeightValues } from "./skin-weights.ts
 import { createSkinWeightsPanel } from "./skin-weights-panel.ts";
 import { createSkinWeightPreview } from "./skin-weight-preview.ts";
 import { assertSplatTransformUndoFits, captureSplatComponentTransform, trimSplatTransformHistory, transformGaussianTRS, validateSplatComponentTransforms, withSplatComponentTransforms, type SplatComponentTransforms } from "./splat-component-transforms.ts";
-import { stageSplatTimelineFrame, type SplatFrameJob } from "./splat-timeline.ts";
+import { splatArchiveFrames, stageSplatTimelineFrame, type SplatFrameJob } from "./splat-timeline.ts";
 import { createSplatTransformRuntime, type SplatTransformRuntime } from "./splat-transform-runtime.ts";
 import { combineWeightedSplatSelection, defaultSplatSoftSettings, hardSplatSelection, selectSplatRadial, selectSplatSphere, splatSelectionWeight, splatSoftCoreFraction, validateSplatSoftSettings, validateWeightedSplatSelection, type SplatSoftSettings, type WeightedSplatSelection } from "./splat-soft-selection.ts";
 import { createSplatSoftPreview } from "./splat-soft-selection-preview.ts";
@@ -286,7 +286,8 @@ async function start() {
   let camera:THREE.PerspectiveCamera|THREE.OrthographicCamera=perspective;
   let activeView:ViewName="perspective", gizmosVisible=true, jointsVisible=true;
   const store = createSceneStore(undefined, (candidate, shape, probes) => {
-    const current = timelinePanel?.turntable ? animationSettings().start : getFrame();
+    const settings = candidate.animation ?? defaultAnimation();
+    const current = timelinePanel?.turntable ? settings.start : Math.max(settings.start, Math.min(settings.end, getFrame()));
     // Prepare the displayed pose last so publication reuses the verified candidate.
     for (const frame of splatCurveProbeFrames(shape, probes, current)) preflightDeformerPose(candidate, shape, frame);
     preflightDeformerPose(candidate, shape, current);
@@ -322,6 +323,7 @@ async function start() {
   let loading = false,
     playing = false,
     time = 0,
+    orbitTime = 0,
     previous = 0;
   let dragId: string | undefined;
   let dragControlPose: { id: string; pose: AnimationPose; node?: TransformNode } | undefined;
@@ -431,7 +433,7 @@ async function start() {
   const animationSettings = () => store.getState().document.animation ?? defaultAnimation();
   let pendingTime: { seconds: number; controller: AbortController } | undefined;
   let playbackElapsed = 0;
-  const getFrame = () => time * animationSettings().fps;
+  const getFrame = () => timelinePanel?.turntable ? animationSettings().start : time * animationSettings().fps;
   const allSelection = (): string[] => {
     const doc = store.getState().document, joints = new Set(doc.joints?.map(joint => joint.id));
     // Earlier store subscribers can refresh panels before syncScene prunes selection.
@@ -470,6 +472,11 @@ async function start() {
     poseOverrides.set(id, pose);
     poseDrafts.capture(doc, poseOverrides);
     store.setState({ document: doc, editLabel: label });
+  }
+  function preflightSceneFrame(doc: SceneDocument, frame: number) {
+    for (const shape of Object.values(doc.nodes)) {
+      if (shape.type === "splatShape" && (shape.morphSurface || shape.deformers?.length)) preflightDeformerPose(doc, shape, frame);
+    }
   }
   function navigationFrame() {
     return pendingTime ? pendingTime.seconds * animationSettings().fps : getFrame();
@@ -519,7 +526,7 @@ async function start() {
     } catch (error) { reject(error); }
   }
   function setFrame(frame: number) {
-    if (!Number.isFinite(frame) || loading || dragId) return;
+    if (!Number.isFinite(frame) || loading || dragId || timelinePanel?.turntable) return;
     if (playing) setPlaying(false);
     clearPoseDraft();
     deformerPanel?.cancelPreview(false);
@@ -1210,7 +1217,11 @@ async function start() {
       if (action === "Bind splats" && !joints.length) return;
       if (!shapes.length) { notice.textContent = "Select a splat object in the Outliner first."; return; }
       if (action === "Bind splats" && joints.length > 256) { notice.textContent = "Select at most 256 joints for binding."; return; }
-      setPlaying(false); time = 0; updateTime(); world.updateMatrixWorld(true);
+      try { preflightSceneFrame(doc, 0); }
+      catch (error) { notice.textContent = (error as Error).message; return; }
+      setPlaying(false);
+      timelinePanel?.setMode(false);
+      time = 0; updateTime(); world.updateMatrixWorld(true);
       terminal.log(`${action}: ${shapes.length} object(s); ${joints.length} selected joint(s).`);
       if (action === "Bind splats") terminal.log(`Joint influences: ${joints.map(j => j.name).join(", ")}. Up to four nearest joints per splat; inverse-distance weights.`);
       const nodes = {...doc.nodes};
@@ -1274,7 +1285,7 @@ async function start() {
   const depth = createSplatDepthPanel({
     menu: element<WaDropdown>("display-menu"), renderer: webgl, world, spark, objects: () => runtime.values(),
     getFrame: () => ({
-      document: store.getState().document, sceneName, frame: getFrame(), time, view: activeView,
+      document: store.getState().document, sceneName, frame: getFrame(), time: timelinePanel?.turntable ? orbitTime : time, view: activeView,
       camera, orbitTarget: controls.target, available: !loading && !playing && !dragId && !meshTopologyPreview && !splatPaintTool?.busy && !splatMaskPaintTool?.busy,
     }),
     report: message => { element("file-status").textContent = message; },
@@ -1881,9 +1892,16 @@ async function start() {
   timelinePanel = mountTimeline(store, { getFrame, navigationFrame, setFrame, setKey: keySelection, getSelection: animationSelection,
     deleteDeformerKeys: () => deformerPanel?.deleteKeysAtFrame() ?? false,
     available: () => !loading && !dragId,
-    onModeChange() { setPlaying(false); clearPoseDraft(); time = timelinePanel?.turntable ? 0 : animationSettings().start / animationSettings().fps; updateTime(); },
+    onModeChange(turntable) {
+      const settings = animationSettings();
+      preflightSceneFrame(store.getState().document, settings.start);
+      setPlaying(false); clearPoseDraft();
+      timelinePanel!.setMode(turntable);
+      time = settings.start / settings.fps;
+      updateTime();
+    },
   });
-  animationEditors = mountAnimationEditors(store, { getFrame, setFrame, getSelection: animationSelection, getDrivenPoses: () => drivenPoses, onSelectTarget: selectAnimationTarget, available: () => !loading && !dragId && !playing });
+  animationEditors = mountAnimationEditors(store, { getFrame, setFrame, getSelection: animationSelection, getDrivenPoses: () => drivenPoses, onSelectTarget: selectAnimationTarget, timeMode: () => !timelinePanel?.turntable, available: () => !loading && !dragId && !playing });
   drivenPanel = createDrivenKeyPanel(store, { getFrame, getSelection: animationSelection, getPoses: () => drivenPoses,
     onEditCurve: id => { animationEditors?.focusDrivenRelationship(id); element("view-graph").click(); },
     available: () => !loading && !dragId && !playing });
@@ -2099,7 +2117,7 @@ async function start() {
     const beforeFPS = previous.document.animation?.fps ?? 24;
     const after = state.document.animation ?? defaultAnimation();
     if (beforeFPS !== after.fps) time = time * beforeFPS / after.fps;
-    if (!timelinePanel?.turntable) time = Math.max(after.start / after.fps, Math.min(after.end / after.fps, time));
+    time = Math.max(after.start / after.fps, Math.min(after.end / after.fps, time));
     if (state.document !== previous.document) terminal.log(`${state.editLabel} · ${transformNodes(state.document).length} objects · ${state.document.joints?.length ?? 0} joints`);
     syncScene();
     queueMicrotask(collectUnusedResources);
@@ -2373,6 +2391,12 @@ async function start() {
     if (modelingPanel?.cancelTopologyPreview(true)) return;
     setPlaying(false);
     const history = store.temporal.getState();
+    const candidate = (redo ? history.futureStates : history.pastStates).at(-1)?.document;
+    const before = animationSettings(), after = candidate?.animation ?? defaultAnimation();
+    if (candidate && (before.start !== after.start || before.end !== after.end)) {
+      try { preflightSceneFrame(candidate, timelinePanel?.turntable ? after.start : Math.max(after.start, Math.min(after.end, getFrame()))); }
+      catch (error) { notice.textContent = (error as Error).message; return; }
+    }
     if (redo) history.redo();
     else history.undo();
     terminal.log(redo ? "Redo requested." : "Undo requested.");
@@ -3217,8 +3241,7 @@ async function start() {
       skinPaintPanel?.stopPainting();
       modelingPanel?.stopEditing();
       clearPoseDraft();
-      const settings = animationSettings();
-      if (!timelinePanel?.turntable && getFrame() >= settings.end) time = settings.start / settings.fps;
+
     }
     playing = value;
     graphPanel?.refresh();
@@ -3248,6 +3271,8 @@ async function start() {
     particlePanel?.refresh();
     channelKeys?.refresh();
     customPanel?.refresh();
+    const settings = animationSettings();
+    if (value && !timelinePanel?.turntable && getFrame() >= settings.end) requestTimelineTime(settings.start / settings.fps);
   }
   function applyAnimationPose() {
     const draggingTarget = !!selectedIKId && dragId === `ik:${selectedIKId}`;
@@ -3288,7 +3313,7 @@ async function start() {
       const node = doc.nodes[id];
       if (node?.type === "transform") applyObjectPose(object, node, pose);
       object.root.visible = !(node?.type === "transform" && node.hidden) && pose.visibility >= .5;
-      object.preview.rotation.y = timelinePanel?.turntable ? (time / duration) * Math.PI * 2 : 0;
+      object.preview.rotation.y = timelinePanel?.turntable ? (orbitTime / duration) * Math.PI * 2 : 0;
     }
     skeleton.applyPose(evaluated);
     for (const object of runtime.values()) if (object.kind === "mesh") object.polygon.applySkin(id => skeleton.boneMatrix(id), evaluated.get(object.shape.parentId)?.morphWeights);
@@ -3302,9 +3327,9 @@ async function start() {
     timelinePanel?.refresh();
     deformerPanel?.refresh();
     const turntable = timelinePanel?.turntable;
-    timeline.value = turntable ? time : getFrame();
+    timeline.value = turntable ? orbitTime : getFrame();
     graphPanel?.refresh();
-    element<HTMLOutputElement>("time").value = turntable ? `${time.toFixed(2)} / 12.00s` : `${Math.round(getFrame())} / ${animationSettings().end}`;
+    element<HTMLOutputElement>("time").value = turntable ? `${orbitTime.toFixed(2)} / 12.00s` : `${Math.round(getFrame())} / ${animationSettings().end}`;
     updatePanel();
     animationEditors?.refresh();
     if (!playing) drivenPanel?.refresh();
@@ -3389,6 +3414,7 @@ async function start() {
     sceneHandle = handle;
     savedDocument = JSON.stringify(doc);
     store.temporal.getState().pause();
+    time = orbitTime = 0;
     store.setState({ document: doc, editLabel: "Open scene" });
     ikBakePanel?.resetScene();
     jointSettingsPanel?.resetScene();
@@ -3409,7 +3435,7 @@ async function start() {
         near: camera.near,
         far: camera.far,
       },
-      time,
+      time: timelinePanel?.turntable ? animationSettings().start / animationSettings().fps : time,
     };
   }
   function restoreEditor(editor: EditorSnapshot) {
@@ -3439,16 +3465,19 @@ async function start() {
     closeFileMenu();
     busy(true);
     try {
-      // Request the destination before asynchronous packing so browser user activation is retained.
-      const destination = await saveDestination(
-        sceneName,
-        saveAs ? undefined : sceneHandle,
-        askFilename,
-      );
+      const doc = store.getState().document;
+      const editor = editorSnapshot();
+      try {
+        for (const frame of splatArchiveFrames(animationSettings(), editor.time)) preflightSceneFrame(doc, frame);
+      } catch (error) {
+        throw Error(`${(error as Error).message} Adjust the deformer or blend shape at the reported frame before saving.`);
+      }
+      // Keep the picker within the user activation, after synchronous validation
+      // and before packing the snapshot or touching a destination file.
+      const destination = await saveDestination(sceneName, saveAs ? undefined : sceneHandle, askFilename);
       if (!destination) return;
       notice.textContent = "Saving scene…";
-      const doc = store.getState().document;
-      const bytes = await encodeProjectBlob(doc, assetFiles, editorSnapshot());
+      const bytes = await encodeProjectBlob(doc, assetFiles, editor);
       await writeScene(bytes, destination);
       sceneName = destination.name;
       sceneHandle = destination.handle;
@@ -3517,7 +3546,7 @@ async function start() {
           if (shape.deformers?.length || shape.morphSurface) {
             transforms = createSplatTransformRuntime(mesh);
             const settings = project.scene.animation ?? defaultAnimation();
-            for (const frame of new Set([0, settings.start, project.editor.time * settings.fps])) {
+            for (const frame of splatArchiveFrames(settings, project.editor.time)) {
               transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame, timelineSplatMorphPose(project.scene, shape, frame));
             }
           }
@@ -3669,7 +3698,7 @@ async function start() {
       store.setState({ document: added.document, editLabel: "Import object" });
       if (initial) store.temporal.getState().clear();
       selectObjects([added.id]);
-      if (timelinePanel?.turntable) time = 0;
+      if (timelinePanel?.turntable) orbitTime = 0;
       updateTime();
       fitView();
       notice.textContent = "";
@@ -3760,15 +3789,16 @@ async function start() {
       await new Promise(resolve => setTimeout(resolve, 0));
       const result = await importFBX(file, store.getState().document, sidecars);
       const textured = await collectEmbeddedTextures(result.document, undefined, warning => result.warnings.push(warning));
+      const settings = textured.animation ?? defaultAnimation();
+      const destination = result.clips[0]?.start ?? Math.max(settings.start, Math.min(settings.end, getFrame()));
+      for (const frame of new Set([settings.start, destination])) preflightSceneFrame(textured, frame);
       clearPoseDraft();
+      if (result.clips.length) timelinePanel?.setMode(false);
+      // The store subscriber converts this frame into the imported FPS at publication.
+      time = destination / animationSettings().fps;
       store.setState({ document: textured, editLabel: "Import FBX" });
       if (result.objectIds.length) selectObjects(result.objectIds);
       else if (result.jointIds.length) selectAnimationTarget(result.jointIds[0]);
-      if (result.clips.length) {
-        const mode = document.querySelector<HTMLSelectElement>("select[aria-label='Playback mode']")!;
-        mode.value = "animation"; mode.dispatchEvent(new Event("change"));
-        time = result.clips[0].start / animationSettings().fps;
-      }
       updateTime(); fitView();
       message = `Imported ${file.name}: ${result.objectIds.length} meshes, ${result.jointIds.length} joints, ${result.clips.length} animation clip${result.clips.length === 1 ? "" : "s"}.`;
       for (const clip of result.clips) terminal.log(`${clip.name}: frames ${clip.start}–${clip.end}`);
@@ -3835,14 +3865,14 @@ async function start() {
   rewind.addEventListener("click", () => {
     setPlaying(false);
     clearPoseDraft();
-    if (timelinePanel?.turntable) { time = 0; updateTime(); }
+    if (timelinePanel?.turntable) { orbitTime = 0; updateTime(); }
     else setFrame(animationSettings().start);
   });
   timeline.addEventListener("input", () => {
     if (dragId || loading) return;
     if (!timelinePanel?.turntable) { setFrame(Number(timeline.value)); return; }
     setPlaying(false); clearPoseDraft();
-    time = Number(timeline.value); updateTime();
+    orbitTime = Number(timeline.value); updateTime();
   });
   skinPaintTool = createSkinWeightPaintTool(webgl.domElement, viewport, {
     readDepth: readSceneDepth,
@@ -3916,7 +3946,7 @@ async function start() {
     const delta = previous ? Math.min((now - previous) / 1000, 0.1) : 0;
     previous = now;
     if (playing) {
-      if (timelinePanel?.turntable) { time = (time + delta) % duration; updateTime(); }
+      if (timelinePanel?.turntable) { orbitTime = (orbitTime + delta) % duration; updateTime(); }
       else {
         playbackElapsed += delta;
         if (!pendingTime) {

@@ -1,4 +1,4 @@
-import { bezierTurningFrames, type AnimationTrack, type CurveKey } from "./animation.ts";
+import { bezierTurningFrames, defaultAnimation, type AnimationTrack, type CurveKey } from "./animation.ts";
 import type { SceneDocument, SplatShapeNode } from "./scene-document.ts";
 import { deformerCurves } from "./splat-deformer-curves.ts";
 
@@ -40,12 +40,15 @@ export function preflightSplatCurveEdit(before: SceneDocument, next: SceneDocume
       pairs.push([a, b]); changedMorphs.set(target, pairs);
     }
   }
-  if (before.nodes === next.nodes && !changedMorphs.size) return;
+  const oldRange = before.animation ?? defaultAnimation(), nextRange = next.animation ?? defaultAnimation();
+  const rangeChanged = oldRange.start !== nextRange.start || oldRange.end !== nextRange.end;
+  if (before.nodes === next.nodes && !changedMorphs.size && !rangeChanged) return;
   for (const shape of Object.values(next.nodes)) {
     if (shape.type !== "splatShape") continue;
     const prior = before.nodes[shape.id];
     if (prior?.type !== "splatShape") continue;
     const probes: SplatCurveProbes = { edited: new Set(), neighboring: new Set() };
+    if (rangeChanged && (shape.morphSurface || shape.deformers?.length)) probes.edited.add(nextRange.start);
     if (shape.morphSurface) for (const [a, b] of changedMorphs.get(shape.parentId) ?? [])
       inspectCurve(a?.keys ?? [], b?.keys ?? [], probes);
     if (shape.deformers !== prior.deformers) for (const entry of shape.deformers ?? []) {
