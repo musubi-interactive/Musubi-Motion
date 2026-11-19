@@ -86,6 +86,28 @@ describe("weighted cluster stack", () => {
     expect(() => validateScene(document)).toThrow(/key/);
   });
 
+  it("publishes an entire staged frame together and restores cached frames without stale picks", async () => {
+    const mesh = makeDemo(), { count } = await prepareSplat(mesh);
+    const runtime = createSplatTransformRuntime(mesh);
+    const keyed = [keySplatDeformer(keySplatDeformer(entry("cluster", count), "position.x", 0, 2), "position.x", 12, 8)];
+    const original = mesh.extSplats!.getSplat(12).center.clone();
+    runtime.update(undefined, keyed, undefined, 0);
+    const first = runtime.value;
+    await runtime.prepareInteractive(undefined, keyed, undefined, 12, undefined, new AbortController().signal);
+    expect(runtime.value).toBe(first);
+    expect(runtime.positions([12])[0]).toBeCloseTo(original.x + 2);
+    runtime.update(undefined, keyed, undefined, 12);
+    expect(runtime.positions([12])[0]).toBeCloseTo(original.x + 8);
+    runtime.update(undefined, keyed, undefined, 0);
+    expect(runtime.value).toBe(first);
+    const cancelled = new AbortController(); cancelled.abort();
+    await expect(runtime.prepareInteractive(undefined, keyed, undefined, 7, undefined, cancelled.signal)).rejects.toThrow();
+    expect(runtime.positions([12])[0]).toBeCloseTo(original.x + 2);
+    runtime.dispose();
+    await expect(runtime.prepareInteractive(undefined, keyed, undefined, 5, undefined, new AbortController().signal)).rejects.toThrow(/disposed/);
+    mesh.dispose();
+  });
+
   it("stages transforms before skinning and preserves the previous runtime on invalid preview", async () => {
     const mesh = makeDemo(), data = await prepareSplat(mesh);
     const runtime = createSplatTransformRuntime(mesh), original = mesh.extSplats!.getSplat(0).center.clone();

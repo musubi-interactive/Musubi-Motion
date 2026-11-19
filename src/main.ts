@@ -422,6 +422,8 @@ async function start() {
   let channelKeys: ReturnType<typeof mountChannelKeyControls> | undefined;
   let evaluationError = "";
   const animationSettings = () => store.getState().document.animation ?? defaultAnimation();
+  let pendingTime: { seconds: number; controller: AbortController } | undefined;
+  let playbackElapsed = 0;
   const getFrame = () => time * animationSettings().fps;
   const allSelection = (): string[] => {
     const doc = store.getState().document, joints = new Set(doc.joints?.map(joint => joint.id));
@@ -462,13 +464,61 @@ async function start() {
     poseDrafts.capture(doc, poseOverrides);
     store.setState({ document: doc, editLabel: label });
   }
+  function cancelPendingTime() {
+    pendingTime?.controller.abort();
+    pendingTime = undefined;
+  }
+  function requestTimelineTime(seconds: number, stopAtEnd = false) {
+    if (pendingTime?.seconds === seconds) return;
+    cancelPendingTime();
+    const doc = store.getState().document, frame = seconds * animationSettings().fps;
+    const jobs = [];
+    for (const shape of Object.values(doc.nodes)) {
+      if (shape.type !== "splatShape") continue;
+      const animated = shape.deformers?.some(entry => entry.keys?.length);
+      const visits = (animated ? shape.deformers!.reduce((n, entry) => n + (entry.weights?.length ?? entry.sourceCount), 0) : 0)
+        + (shape.morphSurface?.sourceCount ?? 0);
+      if (visits < 12000) continue;
+      const object = runtime.get(shape.parentId);
+      if (object?.kind === "splat" && object.transforms) jobs.push({ shape, transforms: object.transforms });
+    }
+    function publish() {
+      time = seconds;
+      if (stopAtEnd) setPlaying(false);
+      updateTime();
+    }
+    if (!jobs.length || seconds === time) { publish(); return; }
+    // The viewport, picking, timeline and skinning advance together. Keep the last
+    // complete frame interactive while the requested frame is staged in slices.
+    skinPoseVersion++;
+    const controller = new AbortController(), signal = controller.signal;
+    pendingTime = { seconds, controller };
+    void (async () => {
+      try {
+        for (const { shape, transforms } of jobs)
+          await transforms.prepareInteractive(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame,
+            timelineSplatMorphPose(doc, shape, frame), signal);
+        if (signal.aborted || loading || dragId || doc !== store.getState().document) return;
+        pendingTime = undefined;
+        publish();
+      } catch (error) {
+        if (!signal.aborted) {
+          setPlaying(false);
+          notice.textContent = (error as Error).message;
+          updateTime(false);
+        }
+      } finally {
+        if (pendingTime?.controller === controller) pendingTime = undefined;
+      }
+    })();
+  }
   function setFrame(frame: number) {
     if (!Number.isFinite(frame) || loading || dragId) return;
-    setPlaying(false); clearPoseDraft();
+    if (playing) setPlaying(false);
+    clearPoseDraft();
     deformerPanel?.cancelPreview(false);
     const settings = animationSettings();
-    time = Math.max(settings.start, Math.min(settings.end, Math.round(frame))) / settings.fps;
-    updateTime();
+    requestTimelineTime(Math.max(settings.start, Math.min(settings.end, Math.round(frame))) / settings.fps);
   }
   function keySelection() {
     if (deformerPanel?.keyActive()) return;
@@ -513,6 +563,8 @@ async function start() {
   }
   function objectBounds(object: RuntimeObject) {
     if (object.kind !== "splat") return object.bounds;
+    if (!object.transformedBounds && object.transforms?.value)
+      object.transformedBounds = object.transforms.bounds(index => index < object.count && (!object.edits || object.edits.active(index)));
     const bounds = object.transformedBounds ?? object.edits?.bounds ?? object.bounds, margin = object.appearance?.boundsMargin;
     return margin ? bounds.clone().expandByScalar(margin) : bounds;
   }
@@ -801,7 +853,6 @@ async function start() {
       const frame = timelinePanel?.turntable ? animationSettings().start : getFrame();
       transforms.update(result.shape.componentTransforms, result.shape.deformers, result.shape.scalarMasks, frame, timelineSplatMorphPose(result.document, result.shape, frame));
       transforms.setBound(!!result.shape.binding);
-      if (transforms.value) object.transformedBounds = transforms.bounds(index => index < data.count);
       if (result.shape.binding) skin = createBinding(mesh, result.shape.binding, undefined, before.joints, transforms);
       const file = new File([bytes], SPLAT_EXTRACTION_NAME);
       checkCurrent();
@@ -1056,6 +1107,7 @@ async function start() {
     }
   }
   function updateBindings() {
+    cancelPendingTime();
     skinPoseVersion++;
     const doc = store.getState().document;
     if (cachedJoints !== doc.joints) {
@@ -1088,7 +1140,7 @@ async function start() {
         notice.textContent = (error as Error).message;
         transformChanged = transforms.update(transformValue);
       }
-      transforms.setBound(!!shape.binding);
+      transforms.setBound(!!shape.binding, !!shape.elasticity);
       if (object.edits?.value !== shape.componentEdits) {
         if (!shape.componentEdits) { object.edits?.mask.dispose(); object.edits = undefined; }
         else {
@@ -1105,7 +1157,7 @@ async function start() {
           }
         }
       }
-      if (transformChanged || editChanged) object.transformedBounds = transforms.value ? transforms.bounds(index => index < object.count && (!object.edits || object.edits.active(index))) : undefined;
+      if (transformChanged || editChanged || shape.elasticity) object.transformedBounds = undefined;
       if (!shape.binding) {
         applySplatPaintRuntime(shape, object, shape.attributePaint);
         continue;
@@ -1695,6 +1747,7 @@ async function start() {
     motionImportPanel?.refresh();
   }
   function syncScene() {
+    cancelPendingTime();
     const doc = store.getState().document;
     const shapedOwners = new Set(Object.values(doc.nodes).filter(node => node.type !== "transform").map(node => node.parentId));
     for (const node of transformNodes(doc)) if (!shapedOwners.has(node.id) && !runtime.has(node.id)) {
@@ -3100,7 +3153,7 @@ async function start() {
     // Let focused buttons receive their native Space activation.
     if (key === " " && event.composedPath().some(target => target instanceof HTMLButtonElement)) return;
     if (key === " ") { event.preventDefault(); if (!loading && !dragId) setPlaying(!playing); return; }
-    if (key === "," || key === ".") { event.preventDefault(); setFrame(getFrame() + (key === "," ? -1 : 1)); return; }
+    if (key === "," || key === ".") { event.preventDefault(); setFrame((pendingTime ? pendingTime.seconds * animationSettings().fps : getFrame()) + (key === "," ? -1 : 1)); return; }
     if (key === "delete") {
       if (loading || dragId) return;
       event.preventDefault();
@@ -3120,6 +3173,7 @@ async function start() {
       return;
     }
     if (key === "escape") {
+      if (pendingTime) { cancelPendingTime(); updateTime(false); }
       abortDrag();
       cancelSelection();
       selectObjects([]);
@@ -3131,6 +3185,8 @@ async function start() {
     }
   });
   function setPlaying(value: boolean) {
+    cancelPendingTime();
+    playbackElapsed = 0;
     splatPaintPanel?.stopPainting();
     cancelComponentScan();
     if (value) {
@@ -3756,15 +3812,14 @@ async function start() {
   rewind.addEventListener("click", () => {
     setPlaying(false);
     clearPoseDraft();
-    time = timelinePanel?.turntable ? 0 : animationSettings().start / animationSettings().fps;
-    updateTime();
+    if (timelinePanel?.turntable) { time = 0; updateTime(); }
+    else setFrame(animationSettings().start);
   });
   timeline.addEventListener("input", () => {
-    setPlaying(false);
     if (dragId || loading) return;
-    clearPoseDraft();
-    time = timelinePanel?.turntable ? Number(timeline.value) : Math.round(Number(timeline.value)) / animationSettings().fps;
-    updateTime();
+    if (!timelinePanel?.turntable) { setFrame(Number(timeline.value)); return; }
+    setPlaying(false); clearPoseDraft();
+    time = Number(timeline.value); updateTime();
   });
   skinPaintTool = createSkinWeightPaintTool(webgl.domElement, viewport, {
     readDepth: readSceneDepth,
@@ -3838,13 +3893,15 @@ async function start() {
     const delta = previous ? Math.min((now - previous) / 1000, 0.1) : 0;
     previous = now;
     if (playing) {
-      if (timelinePanel?.turntable) time = (time + delta) % duration;
+      if (timelinePanel?.turntable) { time = (time + delta) % duration; updateTime(); }
       else {
-        const next = advanceFrame(getFrame(), delta, animationSettings());
-        time = next.frame / animationSettings().fps;
-        if (next.stopped) setPlaying(false);
+        playbackElapsed += delta;
+        if (!pendingTime) {
+          const next = advanceFrame(getFrame(), playbackElapsed, animationSettings());
+          playbackElapsed = 0;
+          requestTimelineTime(next.frame / animationSettings().fps, next.stopped);
+        }
       }
-      updateTime();
     }
     controls.update();
     cancelInvalidSplatGesture();
@@ -3863,7 +3920,10 @@ async function start() {
       const object = runtime.get(id);
       if (object) {
         object.mesh.updateWorldMatrix(true, false);
-        const skin = playing ? [...bindings.values()].find(b => b.mesh === object.mesh)?.skin : undefined;
+        // Exact posed ellipsoid acceleration is only needed for picking. Avoid building
+        // it for a selection outline during a paused scrub on an animated character.
+        const skin = playing || (object.kind === "splat" && object.transforms?.value) ?
+          [...bindings.values()].find(b => b.mesh === object.mesh)?.skin : undefined;
         const bounds = objectBounds(object);
         object.box.box
           .copy(skin ? skin.conservativeBounds(bounds) : boundSelection(object)?.bounds ?? bounds)

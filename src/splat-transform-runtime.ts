@@ -1,7 +1,7 @@
 import { dyno, type SplatMesh } from "@sparkjsdev/spark";
 import { Box3, DataTexture, FloatType, Matrix4, Ray, RGBAFormat, Sphere, Vector3, type Raycaster } from "three";
 import type { SplatAppearanceRead } from "./splat-appearance-runtime.ts";
-import { gaussianFactor, type SplatComponentTransforms } from "./splat-component-transforms.ts";
+import { type SplatComponentTransforms } from "./splat-component-transforms.ts";
 import { prepareSplatDeformerEvaluation, type SplatDeformer } from "./splat-deformers.ts";
 import type { SplatScalarMask } from "./splat-masks.ts";
 
@@ -21,6 +21,8 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
   let current: Prepared | undefined, previous: Prepared | undefined, prepared: Prepared | undefined;
   let bound = false, dynamicSource = false, disposed = false;
   let metadata: Float32Array | undefined, metadataReady: Uint8Array | undefined;
+  // Exact rest factors for repeatedly queried bounds, allocated only for character-sized sources.
+  let boundFactors: Float64Array | undefined;
   const empty: Packed = { data: new Float32Array(4096), count: 0, direct: true };
   let texture = new DataTexture(empty.data, 1024, 1, RGBAFormat, FloatType);
   const sampler = dyno.dynoSampler2D(texture), count = dyno.dynoInt(0), direct = dyno.dynoBool(true);
@@ -83,7 +85,7 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
     target.elements[3] = target.elements[7] = 0;
     return target;
   }
-  function lookup(index: number, target = new Matrix4()) {
+  function lookup(index: number, target?: Matrix4) {
     const packed = current?.packed;
     if (!packed || !packed.count || index < 0) return;
     let row = index;
@@ -95,7 +97,7 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
       }
       row = low;
     }
-    if (row < packed.count && (packed.direct || idAt(packed.data, row) === index)) return readMatrix(packed.data, row, target);
+    if (row < packed.count && (packed.direct || idAt(packed.data, row) === index)) return readMatrix(packed.data, row, target ?? new Matrix4());
   }
   function compile(next: Pose) {
     const { deformers, component, masks, frame, morph } = next;
@@ -208,7 +210,7 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
     setBound(next: boolean, elastic = false) {
       if (dynamicSource !== elastic) {
         dynamicSource = elastic;
-        metadata = metadataReady = undefined;
+        metadata = metadataReady = boundFactors = undefined;
         previous = prepared = undefined;
       }
       if (next === bound) return;
@@ -220,39 +222,63 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
     positions(indices: readonly number[], appearance?: SplatAppearanceRead, includeTransparent = false) {
       const result = new Float32Array(indices.length * 3);
       const source = mesh.extSplats ?? mesh.packedSplats;
+      const center = new Vector3(), matrix = new Matrix4();
       indices.forEach((index, offset) => {
         const splat = source!.getSplat(index);
-        const center = splat.center.clone(), affine = lookup(index);
+        center.copy(splat.center);
+        const affine = lookup(index, matrix);
         if (affine) center.applyMatrix4(affine);
-        result.set(!includeTransparent && (appearance?.opacity(index, splat.opacity) ?? splat.opacity) * mesh.opacity < mesh.minRaycastOpacity ? [NaN, NaN, NaN] : center.toArray(), offset * 3);
+        if (!includeTransparent && (appearance?.opacity(index, splat.opacity) ?? splat.opacity) * mesh.opacity < mesh.minRaycastOpacity)
+          result.fill(NaN, offset * 3, offset * 3 + 3);
+        else center.toArray(result, offset * 3);
       });
       return result;
     },
     bounds(active: (index: number) => boolean) {
-      const result = new Box3(), matrix = new Matrix4(), extent = new Vector3(), point = new Vector3();
-      (mesh.extSplats ?? mesh.packedSplats)?.forEachSplat((index, center, scales, rotation, opacity) => {
+      const source = mesh.extSplats ?? mesh.packedSplats;
+      const result = new Box3(), matrix = new Matrix4(), affine = new Matrix4();
+      function expand(index: number, opacity: number) {
         if (!active(index) || opacity * mesh.opacity < mesh.minRaycastOpacity) return;
-        matrix.compose(center, rotation, scales);
-        const affine = lookup(index);
-        if (affine) matrix.premultiply(affine);
+        if (lookup(index, affine)) matrix.premultiply(affine);
         const e = matrix.elements;
-        extent.set(Math.hypot(e[0], e[4], e[8]), Math.hypot(e[1], e[5], e[9]), Math.hypot(e[2], e[6], e[10])).multiplyScalar(2);
-        point.set(e[12], e[13], e[14]);
-        result.expandByPoint(point.add(extent));
-        result.expandByPoint(point.addScaledVector(extent, -2));
-      });
+        const rx = 2 * Math.sqrt(e[0]*e[0] + e[4]*e[4] + e[8]*e[8]);
+        const ry = 2 * Math.sqrt(e[1]*e[1] + e[5]*e[5] + e[9]*e[9]);
+        const rz = 2 * Math.sqrt(e[2]*e[2] + e[6]*e[6] + e[10]*e[10]);
+        result.min.set(Math.min(result.min.x, e[12]-rx), Math.min(result.min.y, e[13]-ry), Math.min(result.min.z, e[14]-rz));
+        result.max.set(Math.max(result.max.x, e[12]+rx), Math.max(result.max.y, e[13]+ry), Math.max(result.max.z, e[14]+rz));
+      }
+      if (boundFactors) {
+        for (let index = 0; index < boundFactors.length / 16; index++) {
+          matrix.fromArray(boundFactors, index * 16);
+          const opacity = matrix.elements[3];
+          matrix.elements[3] = 0;
+          expand(index, opacity);
+        }
+      } else if (source) {
+        if (!dynamicSource && source.numSplats <= 100000) boundFactors = new Float64Array(source.numSplats * 16);
+        source.forEachSplat((index, center, scales, rotation, opacity) => {
+          matrix.compose(center, rotation, scales);
+          if (boundFactors) {
+            matrix.toArray(boundFactors, index * 16);
+            boundFactors[index * 16 + 3] = opacity;
+          }
+          expand(index, opacity);
+        });
+      }
       return result;
     },
     pick(active: (index: number) => boolean, raycaster: Raycaster, appearance?: SplatAppearanceRead) {
       mesh.updateWorldMatrix(true, false);
       const ray = raycaster.ray.clone().applyMatrix4(mesh.matrixWorld.clone().invert());
       const sphere = new Sphere(new Vector3(), 1), hit = new Vector3();
+      const affine = new Matrix4(), factor = new Matrix4(), inverse = new Matrix4(), local = new Ray(), size = new Vector3();
       let nearest = Infinity;
       (mesh.extSplats ?? mesh.packedSplats)?.forEachSplat((index, center, scales, rotation, opacity) => {
         if (!active(index) || (appearance?.opacity(index, opacity) ?? opacity) * mesh.opacity < mesh.minRaycastOpacity || Math.min(scales.x, scales.y, scales.z) <= 0) return;
-        const factor = gaussianFactor(center, scales.clone().multiplyScalar(2 * (appearance?.scale(index) ?? 1)), rotation, lookup(index));
+        factor.compose(center, rotation, size.copy(scales).multiplyScalar(2 * (appearance?.scale(index) ?? 1)));
+        if (lookup(index, affine)) factor.premultiply(affine);
         if (Math.abs(factor.determinant()) < 1e-24) return;
-        const local = new Ray().copy(ray).applyMatrix4(factor.clone().invert());
+        local.copy(ray).applyMatrix4(inverse.copy(factor).invert());
         if (!local.intersectSphere(sphere, hit)) return;
         hit.applyMatrix4(factor).applyMatrix4(mesh.matrixWorld);
         const distance = hit.distanceTo(raycaster.ray.origin);
@@ -264,7 +290,7 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
       mesh.covObjectModifiers = mesh.covObjectModifiers?.filter(candidate => candidate !== modifier);
       disposed = true;
       current = previous = prepared = undefined;
-      metadata = metadataReady = undefined;
+      metadata = metadataReady = boundFactors = undefined;
       texture.dispose(); mesh.updateGenerator();
     },
   };
