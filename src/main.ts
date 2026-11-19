@@ -2019,9 +2019,9 @@ async function start() {
   motionImportPanel = createMotionImportPanel(store, {
     available: () => !loading && !dragId && !playing,
     selectedJoint: () => skeleton.selectedIds.values().next().value,
+    preflight(stage) { preflightSceneFrame(stage.document, stage.start); },
     onImport(stage) {
-      const mode = document.querySelector<HTMLSelectElement>("select[aria-label='Playback mode']")!;
-      if (mode.value !== "animation") { mode.value = "animation"; mode.dispatchEvent(new Event("change")); }
+      timelinePanel?.setMode(false);
       selectAnimationTarget(stage.rootId);
       setFrame(stage.start);
       terminal.log(`${stage.name}: frames ${stage.start}–${stage.end} · ${stage.jointIds.length} joints`);

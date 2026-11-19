@@ -8,6 +8,7 @@ import "./motion-import-panel.css";
 export function createMotionImportPanel(store: SceneStore, options: {
   available(): boolean;
   selectedJoint(): string | undefined;
+  preflight(stage: MixamoStage): void;
   onImport(stage: MixamoStage): void;
 }) {
   const element = document.createElement("section");
@@ -242,8 +243,9 @@ export function createMotionImportPanel(store: SceneStore, options: {
     if (!stage || !options.available()) return;
     const next = stage;
     try {
-      clear(`Imported ${next.name} · Frames ${next.start}–${next.end}`);
+      options.preflight(next);
       commitMixamoTake(store, next);
+      clear(`Imported ${next.name} · Frames ${next.start}–${next.end}`);
       options.onImport(next);
     } catch (error) { status.textContent = (error as Error).message; }
   };
