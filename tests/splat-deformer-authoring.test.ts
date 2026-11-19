@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
 import { Matrix3, Vector3, Quaternion } from "three";
 import { decodeProject } from "../src/project-archive.ts";
+import { addSplatExtraction } from "../src/splat-extraction.ts";
 import { createSceneStore } from "../src/scene-store.ts";
 import { editingTracks, setKeys, moveKeys, deleteKeys, patchKeys, pasteKeys, copyKeys, scaleKeys, insertKey, evaluateCurve } from "../src/animation.ts";
 import { rebindLattice } from "../src/splat-lattice-rebind.ts";
@@ -10,6 +11,20 @@ import { sampleSplatDeformer, type SplatDeformer } from "../src/splat-deformers.
 import { selectedPointPose, transformSelectedPoints, latticePointGroup } from "../src/splat-point-selection.ts";
 
 describe("PR43 curves in the native time editors", () => {
+  it("keeps keys on duplicated splats independent of their source", async () => {
+    const { scene } = await decodeProject(new Uint8Array(await readFile("examples/animated-splat-deformers.msb")));
+    const source = scene.nodes["tower-shape"];
+    if (source.type !== "splatShape") throw Error("source");
+    const original = editingTracks(scene).find(t => t.id.includes('"lattice"'))!;
+    const added = addSplatExtraction(scene, { shapeId: source.id, assetId: source.assetId, count: source.deformers![0].sourceCount }, Uint32Array.of(0, 1), 256);
+    const store = createSceneStore(added.document);
+    const copied = editingTracks(added.document).find(t => t.targetId === added.id && t.id.includes('"point.19.x"'))!;
+    expect(copied.keys.map(k => k.id)).not.toEqual(original.keys.map(k => k.id));
+    patchKeys(store, [copied.keys[0].id], { interpolation: "step" });
+    const edited = editingTracks(store.getState().document);
+    expect(edited.find(t => t.id === copied.id)!.keys[0].interpolation).toBe("step");
+    expect(edited.find(t => t.id === original.id)!.keys[0].interpolation).toBe("linear");
+  });
   it("shares selection, interpolation, shape-preserving inserts, mixed retiming, clipboard and atomic undo with object curves", async () => {
     const { scene } = await decodeProject(new Uint8Array(await readFile("examples/animated-splat-deformers.msb")));
     const store = createSceneStore(scene);

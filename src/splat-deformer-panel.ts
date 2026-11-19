@@ -67,7 +67,7 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
   let indices = [0];
   let error = "";
   let preview: { document: SceneDocument; frame: number; shapeId: string; stack: readonly SplatDeformer[] } | undefined;
-  let rendered: { shape: SplatShapeNode | undefined; frame: number; id: string; index: number; enabled: boolean; selected: number; handles: boolean } | undefined;
+  let rendered: { shape: SplatShapeNode | undefined; frame: number; id: string; index: number; enabled: boolean; canKey: boolean; selected: number; handles: boolean } | undefined;
 
   function clearPreview(repaint = true) {
     if (!preview) return;
@@ -231,6 +231,7 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
     label.append(input);
     const frame = Math.round(options.frame()), atFrame = entry.keys?.some(key => key.channel === control.id && key.frame === frame);
     const key = button(atFrame ? "◆" : "◇", () => run(() => {
+      if (!options.available() || !options.canKey()) return;
       const next = atFrame ? { ...entry, keys: entry.keys?.filter(value => value.channel !== control.id || value.frame !== frame) }
         : keySplatDeformer(entry, control.id, frame, control.value);
       change(shape, next, atFrame ? `Remove ${control.label} key` : `Key ${control.label}`);
@@ -257,7 +258,7 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
 
   function refresh() {
     const context = options.context(), shape = context?.shape, stack = shape?.deformers ?? [];
-    const enabled = options.available();
+    const enabled = options.available(), canKey = options.canKey();
     if (shape?.id !== shapeId || !stack.some(value => value.id === id)) {
       shapeId = shape?.id ?? "";
       id = stack[0]?.id ?? "";
@@ -270,7 +271,7 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
       context.componentMode ? `${context.indices.length.toLocaleString()} selected originals` : `${context.count.toLocaleString()} original splats`);
     const frame = options.frame(), selected = context?.indices.length ?? 0;
     if (rendered && rendered.shape === shape && rendered.id === id && rendered.index === index &&
-      rendered.enabled === enabled && rendered.selected === selected && rendered.handles === editHandles) {
+      rendered.enabled === enabled && rendered.canKey === canKey && rendered.selected === selected && rendered.handles === editHandles) {
       if (rendered.frame === frame) return;
       if (!enabled) {
         // During playback keep the inspector alive and update only displayed values.
@@ -289,7 +290,7 @@ export function createSplatDeformerPanel(store: SceneStore, options: PanelOption
         return;
       }
     }
-    rendered = { shape, frame, id, index, enabled, selected, handles: editHandles };
+    rendered = { shape, frame, id, index, enabled, canKey, selected, handles: editHandles };
     body.replaceChildren();
     const offset = stack.findIndex(entry => entry.id === id), entry = stack[offset];
     if (!shape || !entry) { options.onContextChange?.(); return; }
