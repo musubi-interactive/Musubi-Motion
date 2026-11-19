@@ -105,6 +105,7 @@ function frameTransform(params: SplatNonlinearFrame): HandleTransform {
 export function nonlinearHandles<P extends SplatNonlinearFrame>() {
   return {
     count: () => 3,
+    localAxis: (index: number) => index === 0 ? undefined : "y" as const,
     name: (index: number) => ["Frame", "Low Bound", "High Bound"][index],
     modes: (index: number) => index === 0 ? ["translate", "rotate", "scale"] as const : ["translate"] as const,
     get(params: P, index: number): HandleTransform {

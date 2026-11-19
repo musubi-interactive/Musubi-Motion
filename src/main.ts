@@ -1,3 +1,4 @@
+import { assertSplatDeformerUndoFits, trimSplatDeformerHistory } from "./splat-deformer-panel.ts";
 import { createSplatControlOverlay, splatCageControlLayout } from "./splat-control-overlay.ts";
 import { createSplatCageBindingPanel } from "./splat-cage-binding-panel.ts";
 import { createSplatCageFromGeometry } from "./splat-cage.ts";
@@ -765,6 +766,7 @@ async function start() {
       assertSplatTransformUndoFits(before, result.shape.componentTransforms);
       assertSplatMaskUndoFits(before, result.document);
       assertSplatPaintUndoFits(before, result.document);
+      assertSplatDeformerUndoFits(before, result.document);
       mesh = createExtractedSplatMesh(bytes);
       const data = await prepareSplat(mesh);
       checkCurrent();
@@ -775,10 +777,10 @@ async function start() {
       root.add(preview);
       const transforms = createSplatTransformRuntime(mesh);
       object = { kind: "splat", root, preview, box, mesh, ...data, assetId: result.assetId, transforms };
-      transforms.update(result.shape.componentTransforms);
+      transforms.update(result.shape.componentTransforms, result.shape.deformers, result.shape.scalarMasks, timelinePanel?.turntable ? animationSettings().start : getFrame());
       transforms.setBound(!!result.shape.binding);
+      if (transforms.value) object.transformedBounds = transforms.bounds(index => index < data.count);
       if (result.shape.binding) skin = createBinding(mesh, result.shape.binding, undefined, before.joints, transforms);
-      else if (result.shape.componentTransforms) object.transformedBounds = transforms.bounds(index => index < data.count);
       const file = new File([bytes], SPLAT_EXTRACTION_NAME);
       checkCurrent();
 
@@ -796,6 +798,7 @@ async function start() {
       trimSplatTransformHistory(store);
       trimSplatMaskHistory(store);
       trimSplatPaintHistory(store);
+      trimSplatDeformerHistory(store);
       selectObjects([result.id]);
       notice.textContent = `Duplicated ${indices.length.toLocaleString()} selected splats into a new object.`;
     } catch (error) {
@@ -1329,6 +1332,7 @@ async function start() {
     const handle = currentDeformerHandle();
     syncDeformerOverlay(handle);
     if (handleDrag) return;
+    transform.showX = transform.showY = transform.showZ = true;
     if (handle && !playing && !loading && gizmosVisible) {
       const pose = handle.adapter.get(handle.params, handle.index);
       const modes = typeof handle.adapter.modes === "function" ? handle.adapter.modes(handle.index) : handle.adapter.modes;
@@ -1336,7 +1340,11 @@ async function start() {
         if (deformerProxy.parent !== handle.object.mesh) handle.object.mesh.add(deformerProxy);
         deformerProxy.position.copy(pose.position); deformerProxy.quaternion.copy(pose.rotation); deformerProxy.scale.copy(pose.scale);
         deformerProxy.updateWorldMatrix(true, false);
-        transform.setSpace(objectOrientation === "object" ? "local" : "world"); transform.setMode(currentMode);
+        const axis = handle.adapter.localAxis?.(handle.index);
+        transform.showX = !axis || axis === "x";
+        transform.showY = !axis || axis === "y";
+        transform.showZ = !axis || axis === "z";
+        transform.setSpace(axis || objectOrientation === "object" ? "local" : "world"); transform.setMode(currentMode);
         if (transform.object !== deformerProxy) transform.attach(deformerProxy);
         transform.enabled = true; transform.getHelper().visible = true; return;
       }
@@ -2934,7 +2942,7 @@ async function start() {
     )
       return;
     const key = event.key.toLowerCase();
-    if (key === "escape" && splatDrag) { event.preventDefault(); abortDrag(); return; }
+    if (key === "escape" && (splatDrag || handleDrag)) { event.preventDefault(); abortDrag(); return; }
     if (key === "escape" && splatComponent) { event.preventDefault(); cancelComponentScan(); cancelSelection(); return; }
     if (key === "escape" && meshDrag) { event.preventDefault(); abortDrag(); return; }
     if (key === "escape" && modelingPanel?.cancelTopologyPreview(true)) { event.preventDefault(); return; }
