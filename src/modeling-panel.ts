@@ -5,10 +5,15 @@ import { mergeMeshVerticesToCenter } from "./mesh-merge.ts";
 import { deleteMeshEdges } from "./mesh-edge-delete.ts";
 import { reverseMeshNormals } from "./mesh-normals.ts";
 import { commitMeshBevel, MAX_BEVEL_SEGMENTS, prepareMeshBevel, type MeshBevelResult } from "./mesh-bevel.ts";
+import { commitMeshBridge, expandBridgeBoundaryEdges, MAX_BRIDGE_SEGMENTS, prepareMeshBridge, type MeshBridgeResult } from "./mesh-bridge.ts";
 import { propertyInteraction } from "./property-interaction.ts";
 
 export type MeshComponentMode = "vertex" | "edge" | "face";
-export type BevelPreview = { shapeId: string; shape?: MeshShapeNode; edgeIds: readonly string[] };
+export type TopologyPreview = { shapeId: string; shape?: MeshShapeNode; edgeIds: readonly string[] };
+type TopologySession = { edgeIds: string[] } & (
+  { kind: "bevel"; prepared: ReturnType<typeof prepareMeshBevel>; result?: MeshBevelResult } |
+  { kind: "bridge"; prepared: ReturnType<typeof prepareMeshBridge>; result?: MeshBridgeResult }
+);
 type Options = {
   available: () => boolean;
   /** Keep the active component request while a viewport drag temporarily disables edits. */
@@ -17,7 +22,7 @@ type Options = {
   onSelectObject: (id: string) => void;
   onComponentMode: (request: { shapeId: string; mode: MeshComponentMode } | undefined) => void;
   onComponentSelection: (shapeId: string, mode: MeshComponentMode, ids: string[]) => void;
-  onBevelPreview: (preview: BevelPreview | undefined) => void;
+  onTopologyPreview: (preview: TopologyPreview | undefined) => void;
 };
 
 /** Modeling UI uses the same validated commands as viewport tools. Selection is runtime state. */
@@ -31,7 +36,7 @@ export function createModelingPanel(store: SceneStore, options: Options) {
     .modeling-panel :focus-visible{outline:1px solid var(--strong)}.modeling-panel .modeling-xyz{display:grid;grid-template-columns:repeat(3,minmax(40px,1fr));gap:6px}.modeling-panel .modeling-actions{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
     .modeling-panel .modeling-check{display:flex;gap:7px;align-items:center}.modeling-panel .modeling-status{min-height:20px;overflow-wrap:anywhere}.modeling-panel .modeling-status[data-error=true]{color:#ce756a}
     .modeling-panel details{margin:8px 0 12px}.modeling-panel summary{cursor:pointer;padding:5px 0;color:var(--text);font-weight:600}.modeling-panel details>fieldset{margin-top:6px}
-    .modeling-panel .bevel-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.modeling-panel .bevel-fields input{text-align:right}`;
+    .modeling-panel .topology-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.modeling-panel .topology-fields input{text-align:right}`;
   function label(text: string, control: HTMLElement) { const node = document.createElement("label"); node.append(document.createTextNode(text), control); return node; }
   function group(text: string) { const node = document.createElement("fieldset"), legend = document.createElement("legend"); legend.textContent = text; node.append(legend); return node; }
   function select(name: string) { const node = document.createElement("select"); node.setAttribute("aria-label", name); return node; }
@@ -48,8 +53,8 @@ export function createModelingPanel(store: SceneStore, options: Options) {
   let cachedShape: MeshShapeNode | undefined;
   let cachedEdges: ReturnType<typeof meshEdges> = [];
   let cachedRows: Record<MeshComponentMode, { id: string; text: string }[]> = { vertex: [], edge: [], face: [] };
-  let bevel: { prepared: ReturnType<typeof prepareMeshBevel>; edgeIds: string[]; result?: MeshBevelResult } | undefined;
-  let bevelFrame: number | undefined;
+  let preview: TopologySession | undefined;
+  let previewFrame: number | undefined;
   const creation = group("Create Primitive"), primitive = select("Mesh primitive");
   const creationDetails = document.createElement("details"), creationSummary = document.createElement("summary"); creationSummary.textContent = "Create Primitive";
   creation.querySelector("legend")!.hidden = true; creation.setAttribute("aria-label", "Create Primitive"); creationDetails.append(creationSummary, creation);
@@ -104,22 +109,45 @@ export function createModelingPanel(store: SceneStore, options: Options) {
   const bevelStart = button("Bevel", () => startBevel());
   bevelStart.title = "Bevel selected edges on closed convex polygon shells";
   const bevelControls = group("Bevel"), bevelFields = document.createElement("div");
-  bevelFields.className = "bevel-fields";
+  bevelFields.className = "topology-fields";
   const bevelWidth = number("Bevel Width", "0.25");
   bevelWidth.min = "0"; bevelWidth.max = "1"; bevelWidth.step = "0.01";
   const bevelSegments = number("Bevel Segments", "1");
   bevelSegments.min = "1"; bevelSegments.max = String(MAX_BEVEL_SEGMENTS); bevelSegments.step = "1";
   const widthLabel = label("Width (fraction)", bevelWidth), segmentsLabel = label("Segments", bevelSegments);
   bevelFields.append(widthLabel, segmentsLabel);
-  const bevelApply = button("Apply Bevel", applyBevel), bevelCancel = button("Cancel Bevel", () => cancelBevel(true));
+  const bevelApply = button("Apply Bevel", applyTopologyPreview), bevelCancel = button("Cancel Bevel", () => cancelTopologyPreview(true));
   const bevelActions = document.createElement("div"); bevelActions.className = "modeling-actions";
   bevelActions.append(bevelApply, bevelCancel);
   const bevelStatus = document.createElement("p"); bevelStatus.className = "modeling-status";
   bevelStatus.setAttribute("role", "status");
   bevelControls.append(bevelFields, bevelActions, bevelStatus);
+  const selectBoundaries = button("Select Boundary Loops", () => run(() => {
+    const shape = requiredShape();
+    setComponentSelection(shape.id, "edge", expandBridgeBoundaryEdges(shape, selectedIds));
+  }, "Boundary loops selected."));
+  selectBoundaries.title = "Pick a boundary edge on each loop, then expand the edge selection to the complete loops";
+  const bridgeStart = button("Bridge", () => startBridge());
+  bridgeStart.title = "Bridge two equal, convex boundary loops in separated parallel planes";
+  const bridgeControls = group("Bridge"), bridgeFields = document.createElement("div");
+  bridgeFields.className = "topology-fields";
+  const bridgeDirection = select("Bridge Direction");
+  bridgeDirection.add(new Option("Automatic", "auto"));
+  bridgeDirection.add(new Option("Forward", "forward"));
+  bridgeDirection.add(new Option("Reverse", "reverse"));
+  const bridgeOffset = number("Bridge Offset"), bridgeSegments = number("Bridge Segments", "1");
+  bridgeOffset.min = "0"; bridgeOffset.step = "1";
+  bridgeSegments.min = "1"; bridgeSegments.max = String(MAX_BRIDGE_SEGMENTS); bridgeSegments.step = "1";
+  const bridgeOffsetLabel = label("Offset", bridgeOffset), bridgeSegmentsLabel = label("Segments", bridgeSegments);
+  bridgeFields.append(bridgeOffsetLabel, bridgeSegmentsLabel);
+  const bridgeApply = button("Apply Bridge", applyTopologyPreview), bridgeCancel = button("Cancel Bridge", () => cancelTopologyPreview(true));
+  const bridgeActions = document.createElement("div"); bridgeActions.className = "modeling-actions"; bridgeActions.append(bridgeApply, bridgeCancel);
+  const bridgeStatus = document.createElement("p"); bridgeStatus.className = "modeling-status"; bridgeStatus.setAttribute("role", "status");
+  bridgeControls.append(label("Direction", bridgeDirection), bridgeFields, bridgeActions, bridgeStatus);
+  bridgeDirection.addEventListener("change", scheduleTopologyPreview);
   const edgeButtons = document.createElement("div"); edgeButtons.className = "modeling-actions";
-  edgeButtons.append(bevelStart, removeEdges);
-  edgeActions.append(edgeButtons, bevelControls, edgeHelp); topology.append(merge, edgeActions, faceActions);
+  edgeButtons.append(bevelStart, selectBoundaries, bridgeStart, removeEdges);
+  edgeActions.append(edgeButtons, bevelControls, bridgeControls, edgeHelp); topology.append(merge, edgeActions, faceActions);
   const appearance = group("Appearance"), color = document.createElement("input"); color.type = "color"; color.setAttribute("aria-label", "Mesh color");
   const shading = select("Mesh shading"); shading.add(new Option("Flat", "flat")); shading.add(new Option("Smooth", "smooth"));
   const wireframe = document.createElement("input"); wireframe.type = "checkbox"; const wireframeLabel = label("Wireframe", wireframe); wireframeLabel.className = "modeling-check";
@@ -132,95 +160,132 @@ export function createModelingPanel(store: SceneStore, options: Options) {
   appearance.append(label("Color", color), label("Shading", shading), wireframeLabel, normalActions);
   element.append(style, creationDetails, label("Mesh object", objects), empty, components, topology, appearance, status);
 
-  const bevelLocks = ([[bevelWidth, widthLabel], [bevelSegments, segmentsLabel]] as const).map(([input, handle]) => {
-    const refreshLock = propertyInteraction(input, () => `bevel/${shapeId}/${input.getAttribute("aria-label")}`, handle, () => ({
-      update: () => scheduleBevel(),
-      end: () => scheduleBevel(),
+  const topologyLocks = ([[bevelWidth, widthLabel], [bevelSegments, segmentsLabel], [bridgeOffset, bridgeOffsetLabel], [bridgeSegments, bridgeSegmentsLabel]] as const).map(([input, handle]) => {
+    const refreshLock = propertyInteraction(input, () => `topology/${preview?.kind}/${shapeId}/${input.getAttribute("aria-label")}`, handle, () => ({
+      update: scheduleTopologyPreview,
+      end: scheduleTopologyPreview,
     }));
-    input.addEventListener("input", scheduleBevel);
-    input.addEventListener("change", scheduleBevel);
+    input.addEventListener("input", scheduleTopologyPreview);
+    input.addEventListener("change", scheduleTopologyPreview);
     input.addEventListener("keydown", event => {
-      if (event.key !== "Enter" || !bevel) return;
+      if (event.key !== "Enter" || !preview) return;
       event.preventDefault(); event.stopPropagation();
-      applyBevel();
+      applyTopologyPreview();
     });
     return refreshLock;
   });
 
   function startBevel() {
-    if (bevel) { bevelWidth.focus(); return; }
+    if (preview) return;
     run(() => {
       if (componentMode() !== "edge") throw Error("Select mesh edges before using Bevel.");
       const shape = requiredShape(), edgeIds = [...selectedIds];
-      bevel = { prepared: prepareMeshBevel(shape, edgeIds), edgeIds };
+      preview = { kind: "bevel", prepared: prepareMeshBevel(shape, edgeIds), edgeIds };
       bevelWidth.value = "0.25";
       bevelSegments.value = "1";
-      bevelLocks.forEach(refreshLock => refreshLock());
-      updateBevel();
+      topologyLocks.forEach(refreshLock => refreshLock());
+      updateTopologyPreview();
     });
-    if (bevel) {
+    if (!bevelControls.hidden) {
       bevelControls.scrollIntoView({ block: "nearest" });
       bevelWidth.focus({ preventScroll: true });
     }
   }
 
-  function scheduleBevel() {
-    if (bevel && bevelFrame === undefined) bevelFrame = requestAnimationFrame(updateBevel);
+  function startBridge() {
+    if (preview) return;
+    run(() => {
+      if (componentMode() !== "edge") throw Error("Select two boundary loops before using Bridge.");
+      const shape = requiredShape(), edgeIds = [...selectedIds];
+      const prepared = prepareMeshBridge(shape, edgeIds);
+      preview = { kind: "bridge", prepared, edgeIds };
+      bridgeDirection.value = "auto";
+      bridgeDirection.options[0].text = `Automatic (${prepared.direction})`;
+      bridgeOffset.max = String(prepared.maxOffset); bridgeOffset.value = "0"; bridgeSegments.value = "1";
+      topologyLocks.forEach(refreshLock => refreshLock());
+      updateTopologyPreview();
+    });
+    if (!bridgeControls.hidden) {
+      bridgeControls.scrollIntoView({ block: "nearest" });
+      bridgeOffset.focus({ preventScroll: true });
+    }
   }
 
-  function updateBevel() {
-    if (bevelFrame !== undefined) cancelAnimationFrame(bevelFrame);
-    bevelFrame = undefined;
-    const session = bevel;
+  function scheduleTopologyPreview() {
+    if (preview && previewFrame === undefined) previewFrame = requestAnimationFrame(updateTopologyPreview);
+  }
+
+  function updateTopologyPreview() {
+    if (previewFrame !== undefined) cancelAnimationFrame(previewFrame);
+    previewFrame = undefined;
+    const session = preview;
     if (!session) return;
     const source = session.prepared.source;
-    const width = bevelWidth.valueAsNumber, segments = bevelSegments.valueAsNumber;
-    const baseline: BevelPreview = { shapeId: source.id, edgeIds: session.edgeIds };
-    bevelStatus.dataset.error = "false";
+    const baseline: TopologyPreview = { shapeId: source.id, edgeIds: session.edgeIds };
+    const status = session.kind === "bevel" ? bevelStatus : bridgeStatus;
+    const apply = session.kind === "bevel" ? bevelApply : bridgeApply;
+    status.dataset.error = "false";
     try {
-      const result = session.prepared.evaluate({ width, segments });
-      options.onBevelPreview(result.shape === source ? baseline : {
-        shapeId: source.id, shape: result.shape, edgeIds: session.edgeIds.flatMap(id => result.edgeMap.get(id) ?? []),
-      });
-      session.result = result.shape === source ? undefined : result;
-      bevelStatus.textContent = session.result
-        ? `${session.edgeIds.length} selected ${session.edgeIds.length === 1 ? "edge" : "edges"} · ${result.shape.faces.length} preview faces`
-        : "Width 0 keeps the original mesh.";
+      if (session.kind === "bevel") {
+        const result = session.prepared.evaluate({ width: bevelWidth.valueAsNumber, segments: bevelSegments.valueAsNumber });
+        options.onTopologyPreview(result.shape === source ? baseline : {
+          ...baseline, shape: result.shape, edgeIds: session.edgeIds.flatMap(id => result.edgeMap.get(id) ?? []),
+        });
+        session.result = result.shape === source ? undefined : result;
+        status.textContent = session.result
+          ? `${session.edgeIds.length} selected ${session.edgeIds.length === 1 ? "edge" : "edges"} · ${result.shape.faces.length} preview faces`
+          : "Width 0 keeps the original mesh.";
+      } else {
+        const result = session.prepared.evaluate({ direction: bridgeDirection.value as "auto" | "forward" | "reverse",
+          offset: bridgeOffset.valueAsNumber, segments: bridgeSegments.valueAsNumber });
+        options.onTopologyPreview({ ...baseline, shape: result.shape });
+        session.result = result;
+        status.textContent = `${result.faceIds.length} preview faces`;
+      }
     } catch (error) {
       session.result = undefined;
-      options.onBevelPreview(baseline);
-      bevelStatus.dataset.error = "true";
-      bevelStatus.textContent = error instanceof Error ? error.message : String(error);
+      options.onTopologyPreview(baseline);
+      status.dataset.error = "true";
+      status.textContent = error instanceof Error ? error.message : String(error);
     }
-    bevelApply.disabled = !session.result;
+    apply.disabled = !session.result;
   }
 
-  function clearBevel() {
-    if (!bevel) return;
-    bevel = undefined;
-    if (bevelFrame !== undefined) cancelAnimationFrame(bevelFrame);
-    bevelFrame = undefined;
-    options.onBevelPreview(undefined);
+  function clearTopologyPreview() {
+    if (!preview) return;
+    preview = undefined;
+    if (previewFrame !== undefined) cancelAnimationFrame(previewFrame);
+    previewFrame = undefined;
+    options.onTopologyPreview(undefined);
   }
 
-  function cancelBevel(focus = false): boolean {
-    if (!bevel) return false;
-    clearBevel();
+  function cancelTopologyPreview(focus = false): boolean {
+    if (!preview) return false;
+    const start = preview.kind === "bevel" ? bevelStart : bridgeStart;
+    clearTopologyPreview();
     refresh();
-    if (focus) bevelStart.focus();
+    if (focus) start.focus();
     return true;
   }
 
-  function applyBevel() {
-    if (bevelFrame !== undefined) updateBevel();
-    if (!bevel?.result || !options.available()) return;
-    const { prepared, result, edgeIds } = bevel;
-    clearBevel();
-    run(() => {
-      commitMeshBevel(store, prepared.source, result);
-      selectedIds = [...new Set(edgeIds.flatMap(id => result.edgeMap.get(id) ?? []))];
-    }, "Edges beveled. Bevel rails selected.");
-    bevelStart.focus();
+  function applyTopologyPreview() {
+    if (previewFrame !== undefined) updateTopologyPreview();
+    const session = preview;
+    if (!options.available()) return;
+    if (session?.kind === "bevel" && session.result) {
+      const { prepared, result, edgeIds } = session;
+      clearTopologyPreview();
+      run(() => {
+        commitMeshBevel(store, prepared.source, result);
+        selectedIds = [...new Set(edgeIds.flatMap(id => result.edgeMap.get(id) ?? []))];
+      }, "Edges beveled. Bevel rails selected.");
+      bevelStart.focus();
+    } else if (session?.kind === "bridge" && session.result) {
+      const { prepared, result } = session;
+      clearTopologyPreview();
+      run(() => commitMeshBridge(store, prepared.source, result), "Boundary loops bridged.");
+      bridgeStart.focus();
+    }
   }
 
   function requiredShape(): MeshShapeNode {
@@ -248,7 +313,7 @@ export function createModelingPanel(store: SceneStore, options: Options) {
   }
   function requireFaces() { if (componentMode() !== "face" || !selectedIds.length) throw Error("Select faces before using this operation."); }
   function deleteSelectedComponents(): boolean {
-    if (bevel) return true;
+    if (preview) return true;
     const kind = componentMode();
     if (kind === "face") {
       run(() => { const shape = requiredShape(); requireFaces(); deleteMeshFaces(store, shape.id, [...selectedIds]); selectedIds = []; }, "Selected faces deleted.");
@@ -293,7 +358,7 @@ export function createModelingPanel(store: SceneStore, options: Options) {
     setComponentSelection(shapeId, kind, append ? [...selectedIds, picker.value] : [picker.value]);
   }); }
   function stopEditing() {
-    clearBevel();
+    clearTopologyPreview();
     const oldMode = componentMode(), oldShape = shapeId; mode.value = "object"; selectedIds = [];
     if (modeSignature) { modeSignature = ""; options.onComponentMode(undefined); }
     if (oldMode && oldShape) { emittedSelection = JSON.stringify([oldShape, oldMode, []]); options.onComponentSelection(oldShape, oldMode, []); }
@@ -326,8 +391,8 @@ export function createModelingPanel(store: SceneStore, options: Options) {
     if (objectKey !== objectSignature) { objectSignature = objectKey; objects.replaceChildren(new Option("Choose an editable mesh", ""), ...shapes.map(shape => new Option(doc.nodes[shape.parentId]?.name ?? shape.name, shape.id))); }
     const shape = shapes.find(candidate => candidate.id === shapeId);
     if (!shape) { shapeId = ""; selectedIds = []; mode.value = "object"; }
-    if (bevel && (!available || shape !== bevel.prepared.source || componentMode() !== "edge" ||
-      selectedIds.length !== bevel.edgeIds.length || selectedIds.some((id, index) => id !== bevel?.edgeIds[index]))) clearBevel();
+    if (preview && (!available || shape !== preview.prepared.source || componentMode() !== "edge" ||
+      selectedIds.length !== preview.edgeIds.length || selectedIds.some((id, index) => id !== preview?.edgeIds[index]))) clearTopologyPreview();
     objects.value = shapeId; empty.hidden = !!shape; components.hidden = appearance.hidden = !shape;
     for (const control of Array.from(element.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input,select,button"))) control.disabled = !available;
     objects.disabled = !available || !shapes.length;
@@ -359,16 +424,18 @@ export function createModelingPanel(store: SceneStore, options: Options) {
     if (nextMode !== modeSignature) { modeSignature = nextMode; options.onComponentMode(nextMode ? { shapeId: shape!.id, mode: kind! } : undefined); }
     const nextSelection = shape && kind ? JSON.stringify([shape.id, kind, selectedIds]) : "";
     if (nextSelection !== emittedSelection) { emittedSelection = nextSelection; if (shape && kind) options.onComponentSelection(shape.id, kind, [...selectedIds]); }
-    bevelControls.hidden = !bevel;
-    bevelStart.disabled = !available || kind !== "edge" || !selectedIds.length;
-    bevelStart.hidden = !!bevel;
-    if (bevel) {
+    bevelControls.hidden = preview?.kind !== "bevel";
+    bridgeControls.hidden = preview?.kind !== "bridge";
+    bevelStart.disabled = bridgeStart.disabled = selectBoundaries.disabled = !available || kind !== "edge" || !selectedIds.length;
+    edgeButtons.hidden = !!preview;
+    if (preview) {
+      const controls = preview.kind === "bevel" ? bevelControls : bridgeControls;
       for (const control of Array.from(element.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input,select,button"))) {
-        if (!bevelControls.contains(control)) control.disabled = true;
+        if (!controls.contains(control)) control.disabled = true;
       }
-      bevelApply.disabled = !bevel.result;
+      (preview.kind === "bevel" ? bevelApply : bridgeApply).disabled = !preview.result;
     }
   }
   store.subscribe(() => refresh()); refresh();
-  return { element, refresh, resetScene, stopEditing, setComponentSelection, deleteSelectedComponents, cancelBevel };
+  return { element, refresh, resetScene, stopEditing, setComponentSelection, deleteSelectedComponents, cancelTopologyPreview };
 }
