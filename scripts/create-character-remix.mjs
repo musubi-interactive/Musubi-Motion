@@ -106,7 +106,7 @@ try {
   }
   const peak=(value)=>[[0,0],[24,value],[48,0]];
   scene.animation={...defaultAnimation(),end:48,tracks:[
-    track("L_Arm","rotation.z",peak(136)),track("L_ForeArm","rotation.z",peak(44)),track("Head","rotation.y",peak(23)),
+    track("L_Arm","rotation.z",peak(-118)),track("L_ForeArm","rotation.z",peak(-53)),track("Head","rotation.y",peak(23)),
     ...["courier","original"].flatMap(id=>[track(id,"morph.0",peak(1)),track(id,"morph.1",[[0,0],[18,0],[24,1],[30,0],[48,0]])])]};
   const editor={camera:{view:"front",height:2.25,position:[0,.12,5],target:[0,.12,0],fov:40,near:.01,far:100},time:0};
   const archive=await encodeProject(scene,new Map([[asset.id,new File([made.bytes],asset.fileName)]]),editor);

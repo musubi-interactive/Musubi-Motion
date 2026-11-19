@@ -22,7 +22,7 @@ import { createProceduralGraphPanel } from "./procedural-graph-panel.ts";
 import { createTextureAssetsPanel } from "./texture-assets-panel.ts";
 import { createMaterialPanel } from "./material-panel.ts";
 import { collectEmbeddedTextures, validateTextureDecoding, type TextureAsset } from "./texture-assets.ts";
-import { splatMorphPose, validateSplatMorphs } from "./splat-morph.ts";
+import { prepareSplatMorphPose, splatMorphPose, validateSplatMorphs } from "./splat-morph.ts";
 import { timelineSplatMorphPose } from "./splat-morph-animation.ts";
 import { meshToSplatData } from "./mesh-to-splats";
 import { createMeshSplatColors } from "./mesh-splat-colors";
@@ -116,7 +116,7 @@ import { createBinding } from "./splat-binding.ts";
 import { validateSkinWeightCount, editSkinWeightValues } from "./skin-weights.ts";
 import { createSkinWeightsPanel } from "./skin-weights-panel.ts";
 import { createSkinWeightPreview } from "./skin-weight-preview.ts";
-import { assertSplatTransformUndoFits, captureSplatComponentTransform, trimSplatTransformHistory, validateSplatComponentTransforms, withSplatComponentTransforms, type SplatComponentTransforms } from "./splat-component-transforms.ts";
+import { assertSplatTransformUndoFits, captureSplatComponentTransform, trimSplatTransformHistory, transformGaussianTRS, validateSplatComponentTransforms, withSplatComponentTransforms, type SplatComponentTransforms } from "./splat-component-transforms.ts";
 import { createSplatTransformRuntime, type SplatTransformRuntime } from "./splat-transform-runtime.ts";
 import { combineWeightedSplatSelection, defaultSplatSoftSettings, hardSplatSelection, selectSplatRadial, selectSplatSphere, splatSelectionWeight, splatSoftCoreFraction, validateSplatSoftSettings, validateWeightedSplatSelection, type SplatSoftSettings, type WeightedSplatSelection } from "./splat-soft-selection.ts";
 import { createSplatSoftPreview } from "./splat-soft-selection-preview.ts";
@@ -678,9 +678,19 @@ async function start() {
     if (!context || !identity || playing || loading || pendingComponentPick !== undefined) throw Error("Select visible splats before transforming them.");
     context.object.mesh.updateWorldMatrix(true, false);
     const source = context.object.mesh.extSplats ?? context.object.mesh.packedSplats!;
+    const pose = timelineSplatMorphPose(store.getState().document, context.shape, frame);
+    const morph = pose && prepareSplatMorphPose(pose);
     const snapshot = captureSplatComponentTransform({ document: store.getState().document, identity, selected: splatComponentIds,
       weights: splatComponentWeights, weightFrame: { mode, pivot: useGizmoPivot ? splatComponentProxy.position.clone() : undefined, basis: objectOrientation === "object" ? context.object.mesh.getWorldQuaternion(new THREE.Quaternion()).normalize() : new THREE.Quaternion() },
-      world: context.object.mesh.matrixWorld, getRestCenter: index => source.getSplat(index).center, getGaussian: index => source.getSplat(index),
+      world: context.object.mesh.matrixWorld,
+      getRestCenter(index) {
+        const center = source.getSplat(index).center, affine = morph?.(index);
+        return affine ? center.clone().applyMatrix4(affine) : center;
+      },
+      getGaussian(index) {
+        const splat = source.getSplat(index), affine = morph?.(index);
+        return affine ? transformGaussianTRS(splat.quaternion, splat.scales, affine) : splat;
+      },
       getSkinMatrix: bindings.get(identity.shapeId)?.skin.getSkinMatrix });
     splatComponentProxy.updateWorldMatrix(true, false);
     return { document: store.getState().document, identity, snapshot, startInverse: splatComponentProxy.matrixWorld.clone().invert() };
@@ -1612,7 +1622,11 @@ async function start() {
     if(value)validateElasticity(value);
     store.setState({document:{...doc,nodes:{...doc.nodes,[id]:{...shape,elasticity:value}}},editLabel:value?"Edit Elasticity":"Remove Elasticity"});
   });
-  morphPanel = createMorphPanel(panelHost, store, { getFrame, available: () => !loading && !playing && !dragId, canKey: () => !timelinePanel?.turntable, onStatus: message => { notice.textContent = message; } });
+  morphPanel = createMorphPanel(panelHost, store, { getFrame, preflight(shape, weights) {
+    const object = runtime.get(shape.parentId);
+    if (object?.kind !== "splat" || !object.transforms) throw Error("Load the converted splats before editing blend shapes.");
+    object.transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, getFrame(), splatMorphPose(shape, weights));
+  }, available: () => !loading && !playing && !dragId, canKey: () => !timelinePanel?.turntable, onStatus: message => { notice.textContent = message; } });
   function updatePanel(preview?: TransformChannels) {
     const doc = store.getState().document,
       id = singleId();
@@ -3618,7 +3632,7 @@ async function start() {
       const data = await prepareSplat(candidate);
       const added = addSplat(doc, asset, `${sourceNode.name}_splats`, [0, 0, 0]);
       const node = added.document.nodes[added.id] as TransformNode;
-      Object.assign(node, { ...sourceNode, ...normalizedChannels(pose), id: added.id, hidden: false, name: uniqueName(doc, `${sourceNode.name}_splats`, sourceNode.parentId) });
+      Object.assign(node, { ...sourceNode, id: added.id, hidden: false, name: uniqueName(doc, `${sourceNode.name}_splats`, sourceNode.parentId) });
       if (moveAside && !binding) {
         const width = new THREE.Box3().setFromPoints(source.vertices.map(v => new THREE.Vector3(...v.position))).getSize(new THREE.Vector3()).x;
         const displacement = new THREE.Vector3(width * 1.5, 0, 0).applyMatrix3(new THREE.Matrix3().setFromMatrix4(objectLocalMatrix(sourceNode, pose)));
@@ -3633,7 +3647,19 @@ async function start() {
       if (doc !== store.getState().document) throw Error("The scene changed during conversion. Try again.");
       const root = new THREE.Group(), preview = new THREE.Group(), box = new THREE.Box3Helper(new THREE.Box3(), 0x999999);
       preview.add(candidate); root.add(preview); box.visible = false;
-      runtime.set(node.id, { kind: "splat", root, preview, mesh: candidate, box, assetId: asset.id, ...data });
+      const transforms = createSplatTransformRuntime(candidate);
+      try {
+        const frame = getFrame();
+        transforms.prepare(undefined, undefined, undefined, frame, timelineSplatMorphPose(added.document, shape, frame));
+      } catch (error) {
+        transforms.dispose();
+        throw error;
+      }
+      const drafts = new Map(poseOverrides), draft = drafts.get(sourceNode.id);
+      if (draft && (binding || !moveAside)) drafts.set(node.id,draft);
+      poseDrafts.capture(doc,poseOverrides);
+      poseDrafts.capture(added.document,drafts);
+      runtime.set(node.id, { kind: "splat", root, preview, mesh: candidate, box, assetId: asset.id, transforms, ...data });
       world.add(box); assetFiles.set(asset.id, file);
       store.setState({ document: added.document, editLabel: "Convert mesh to splats" });
       selectObjects([node.id]); fitView();

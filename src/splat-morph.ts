@@ -106,26 +106,65 @@ export function subsetSplatMorphSurface(surface: SplatMorphSurface, ids: Uint32A
     })) };
 }
 
+type RestFace = { origin: Vector3; u: Vector3; v: Vector3; normal: Vector3; inverse: Matrix4 };
+type SurfaceCache = { faces: Map<number, RestFace>; vertices: Map<number, [target: number, delta: VertexDelta][]> };
+const bindCaches = new WeakMap<SplatMorphSurface, SurfaceCache>();
+
+function vertexInfluences(surface: SplatMorphSurface, cache: SurfaceCache, index: number) {
+  let influences = cache.vertices.get(index);
+  if (influences) return influences;
+  influences = [];
+  for (const [target, deltas] of surface.deltas.entries()) {
+    let lo = 0, hi = deltas.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (deltas[mid][0] < index) lo = mid + 1; else hi = mid;
+    }
+    if (deltas[lo]?.[0] === index) influences.push([target, deltas[lo]]);
+  }
+  cache.vertices.set(index, influences);
+  return influences;
+}
+
+function triangleRest(surface: SplatMorphSurface, cache: SurfaceCache, index: number) {
+  let rest = cache.faces.get(index);
+  if (rest) return rest;
+  const [, a, b, c] = surface.faces[index];
+  const origin = new Vector3(...surface.vertices[a]);
+  const u = new Vector3(...surface.vertices[b]).sub(origin), v = new Vector3(...surface.vertices[c]).sub(origin);
+  const normal = u.clone().cross(v).normalize();
+  rest = { origin, u, v, normal, inverse: new Matrix4().makeBasis(u,v,normal).setPosition(origin).invert() };
+  cache.faces.set(index, rest);
+  return rest;
+}
+
 export function prepareSplatMorphPose(pose: SplatMorphPose) {
   const { surface, weights } = pose;
   if (weights.length !== surface.deltas.length || !weights.every(bounded)) throw Error("Invalid splat blend-shape weights.");
-  const moved = new Map<number, Vector3>();
-  weights.forEach((weight, target) => {
-    if (!weight) return;
-    for (const [i,x,y,z] of surface.deltas[target]) {
-      let v = moved.get(i);
-      if (!v) { v = new Vector3(...surface.vertices[i]); moved.set(i,v); }
-      v.x += weight*x; v.y += weight*y; v.z += weight*z;
+  if (!weights.some((w,i) => w !== 0 && surface.deltas[i].length)) return;
+  const cache = bindCaches.get(surface) ?? { faces: new Map(), vertices: new Map() } as SurfaceCache;
+  bindCaches.set(surface, cache);
+  const points = new Map<number, Vector3 | null>(), frames = new Map<number, Matrix4 | undefined>();
+  function displaced(i: number) {
+    if (points.has(i)) return points.get(i);
+    let point: Vector3 | null = null;
+    for (const [target, [,x,y,z]] of vertexInfluences(surface, cache, i)) {
+      const weight = weights[target];
+      if (!weight) continue;
+      point ??= new Vector3(...surface.vertices[i]);
+      point.x += weight*x; point.y += weight*y; point.z += weight*z;
     }
-  });
-  if (!moved.size) return;
-  const frames = surface.faces.map(([,a,b,c]) => {
-    if (!moved.has(a) && !moved.has(b) && !moved.has(c)) return;
-    const [p,q,r] = [a,b,c].map(i => new Vector3(...surface.vertices[i]));
-    const u = q.clone().sub(p), v = r.clone().sub(p), n = u.clone().cross(v).normalize();
-    const inv = new Matrix4().makeBasis(u,v,n).setPosition(p).invert();
-    const origin = moved.get(a) ?? p;
-    const du = (moved.get(b) ?? q).clone().sub(origin), dv = (moved.get(c) ?? r).clone().sub(origin);
+    points.set(i, point);
+    return point;
+  }
+  function faceFrame(index: number) {
+    const [,a,b,c] = surface.faces[index];
+    const pa = displaced(a), pb = displaced(b), pc = displaced(c);
+    if (!pa && !pb && !pc) return;
+    const { origin, u, v, normal, inverse } = triangleRest(surface, cache, index);
+    const p = pa ?? origin;
+    const du = (pb?.clone() ?? new Vector3(...surface.vertices[b])).sub(p);
+    const dv = (pc?.clone() ?? new Vector3(...surface.vertices[c])).sub(p);
     // Exact eyelid closures can collapse a triangle. Bound its two in-plane dimensions
     // to a tiny fraction of the bind dimensions so picking and covariance stay invertible.
     const minU = u.length()*1e-5;
@@ -135,23 +174,27 @@ export function prepareSplatMorphPose(pose: SplatMorphPose) {
     const minHeight = u.clone().normalize().cross(v).length()*1e-5;
     if (altitude.length() < minHeight) {
       if (altitude.lengthSq() === 0) {
-        altitude.crossVectors(n,axis);
+        altitude.crossVectors(normal,axis);
         if (altitude.lengthSq() < 1e-14) altitude.copy(u).normalize().cross(axis);
       }
       dv.copy(axis).multiplyScalar(along).addScaledVector(altitude.normalize(),minHeight);
     }
-    return new Matrix4().makeBasis(du,dv,du.clone().cross(dv).normalize()).setPosition(origin).multiply(inv);
-  });
+    return new Matrix4().makeBasis(du,dv,du.clone().cross(dv).normalize()).setPosition(p).multiply(inverse);
+  }
+
+  // Lazy evaluation shares each triangle's affine across its contiguous source IDs
+  // and lets the interactive compiler cancel even during a large facial morph.
   let last = 0;
   return (index: number) => {
     if (index < (surface.faces[last-1]?.[0] ?? 0) || index >= surface.faces[last][0]) {
-      let lo = 0, hi = frames.length - 1;
+      let lo = 0, hi = surface.faces.length - 1;
       while (lo < hi) {
         const mid = (lo + hi) >>> 1;
         if (surface.faces[mid][0] <= index) lo = mid + 1; else hi = mid;
       }
       last = lo;
     }
-    return frames[last];
+    if (!frames.has(last)) frames.set(last,faceFrame(last));
+    return frames.get(last);
   };
 }

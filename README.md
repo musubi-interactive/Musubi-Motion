@@ -144,6 +144,8 @@ Drag a **panel title tab** toward another panel's edge to split the space, or to
 
 ## Splat and FX examples
 
+- [Courier character study](examples/character-remix.msb) combines a rigged mesh conversion, smile and blink, wrist crossing the torso, a masked jacket texture and an animated lattice. [Exercise the combined workflow](docs/character-remix.md).
+
 - [Splat transform study](examples/splat-transform-study.msb) and [soft selection study](examples/splat-soft-selection.msb) show original-ID component editing, anisotropic splats, and falloff. Select a subset in the transform study to try duplication.
 - [Splat masks](examples/splat-mask-regions.msb), [attribute paint](examples/splat-attribute-paint.msb), and [projected appearance](examples/textures/splat-appearance.msb) show distinct per-object edits.
 - [Camera depth study](examples/splat-depth-study.msb) provides known-distance geometry and splats for checking the viewport and export.
@@ -234,4 +236,4 @@ The World/Object orientation selector is independent of freezing transforms and 
 
 Select one mesh part and choose **Modeling > Convert to splats**. Simple cubes retain the face-grid settings; imported and other meshes use the total splat budget (256 to 100,000 per part). Rigged parts keep their placement and share the existing skeleton with interpolated, normalized four-bone weights. Convert parts separately, then use the Outliner eye buttons to hide their source meshes. These undoable visibility overrides preserve animation keys and save with the project.
 
-Conversion samples embedded diffuse and opacity textures at the mesh UVs, including independent UV transforms. Invisible and alpha-cutout samples are omitted; surviving splats retain sampled opacity and skin weights. The budget is the number of candidate surface samples, so cutouts can produce fewer splats. Blend shapes remain unsupported; advanced material effects are reported as approximations. Mixed-weight bends can differ slightly from the mesh surface; Gaussian silhouettes remain soft.
+Conversion samples embedded diffuse and opacity textures at the mesh UVs, including independent UV transforms. Invisible and alpha-cutout samples are omitted; surviving splats retain sampled opacity and skin weights. The budget is the number of candidate surface samples, so cutouts can produce fewer splats. Converted parts retain named blend shapes, their default weights, and copied morph animation curves. An independent rest-surface snapshot carries the sampled Gaussian centers and ellipsoids through each facial pose before skinning. Advanced material effects are reported as approximations. Mixed-weight bends can differ slightly from the mesh surface; Gaussian silhouettes remain soft.

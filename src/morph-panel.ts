@@ -2,7 +2,7 @@ import { evaluateChannels, setKeys, type AnimationChannel } from "./animation.ts
 import type { MeshShapeNode, SplatShapeNode } from "./scene-document.ts";
 import type { SceneStore } from "./scene-store.ts";
 
-export function createMorphPanel(host: HTMLElement, store: SceneStore, options: { getFrame(): number; available(): boolean; canKey(): boolean; onStatus(message: string): void }) {
+export function createMorphPanel(host: HTMLElement, store: SceneStore, options: { getFrame(): number; available(): boolean; canKey(): boolean; preflight?(shape: SplatShapeNode, weights: readonly number[]): void; onStatus(message: string): void }) {
   const element = document.createElement("section"); element.className = "morph-panel"; host.append(element);
   type Shape = MeshShapeNode | SplatShapeNode;
   let shape: Shape | undefined, signature = "";
@@ -23,10 +23,12 @@ export function createMorphPanel(host: HTMLElement, store: SceneStore, options: 
           try {
             const value = Number(input.value); if (!Number.isFinite(value) || Math.abs(value) > 1e6) throw Error("Enter a finite blend-shape weight within ±1,000,000.");
             const doc = store.getState().document, current = doc.nodes[shape.id] as Shape, channel = `morph.${index}` as AnimationChannel;
+            const pose = evaluateChannels(doc, current.parentId, options.getFrame());
+            pose.morphWeights![index] = value;
+            if (current.type === "splatShape") options.preflight?.(current, pose.morphWeights!);
             const animated = doc.animation?.tracks.some(t => t.targetId === current.parentId && t.channel === channel);
             if (keyed || animated) {
               if (!options.canKey()) throw Error("Switch to Animation mode to key blend shapes.");
-              const pose = evaluateChannels(doc, current.parentId, options.getFrame()); pose.morphWeights![index] = value;
               setKeys(store, [current.parentId], options.getFrame(), new Map([[current.parentId, pose]]), [channel]);
             } else {
               const updateWeight = <T extends { weight: number }>(targets: T[]) =>
