@@ -121,7 +121,7 @@ export function createSplatComponentPanel(actions: { enter: () => void; exit: ()
   const guides: Record<SplatSelectionTool, string> = {
 
     sphere: "Click a visible center to place a world sphere; drag sets its world radius. Numeric center and radius are below.",
-    radial: "Click or drag a 2D circle in CSS pixels. Selection follows the current projected centers, through depth.",
+    radial: "Click or drag a 2D circle in CSS pixels. Selection follows projected centers using the current depth mode.",
     box: "Click a center or drag a box.",
 
     lasso: "Draw a closed freehand region. The outline connects the last point to the first.",

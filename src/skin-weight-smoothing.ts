@@ -27,10 +27,11 @@ export async function indexSkinNeighborhood(context: CleanupContext, radius: num
   function point(index: number): Vec3 { return [positions[index*3], positions[index*3+1], positions[index*3+2]]; }
   function nearest(p: Vec3, count: number, accepts: (i: number) => boolean) {
     const best: {index: number; distance: number}[] = [];
+    let localVisits = 0;
     const [cx, cy, cz] = p.map(cell);
     for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
       for (const index of cells.get(`${cx+dx}/${cy+dy}/${cz+dz}`) ?? []) {
-        if (++visits > 8_000_000) throw Error("Neighborhood is too dense. Reduce the distance or selected region.");
+        if (++localVisits > 16_384 || ++visits > 8_000_000) throw Error("Neighborhood is too dense. Reduce the distance or selected region.");
         if (!accepts(index)) continue;
         const distance = (positions[index*3]-p[0])**2 + (positions[index*3+1]-p[1])**2 + (positions[index*3+2]-p[2])**2;
         if (distance > radius*radius) continue;

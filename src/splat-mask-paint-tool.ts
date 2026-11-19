@@ -74,10 +74,15 @@ export function createSplatMaskPaintTool(canvas: HTMLCanvasElement, host: HTMLEl
     const selected = settings.selectedOnly ? new Set(context.selected) : undefined;
     let yielded = performance.now();
     active.ready = createSkinBrushIndex({ readDepth: settings.depth === "scene-visible" ? options.readDepth : undefined, frontCenters: settings.depth === "front", componentCount: context.count, projectedLimit: SPLAT_MASK_LIMITS.projected,
-      readPositions(start, count) { const ids = Array.from({ length: count }, (_, i) => start + i), positions = context.getPositions(ids, settings.depth === "scene-visible" || settings.depth === "front"); if (selected) ids.forEach((id, i) => { if (!selected.has(id)) positions.fill(NaN, i * 3, i * 3 + 3); }); return positions; },
+      readPositions(start, count) { return context.getPositions(Array.from({ length: count }, (_, i) => start + i), settings.depth === "scene-visible" || settings.depth === "front"); },
       matrixWorld: world, camera, width: rect.width, height: rect.height, cancelled: active.cancelled,
       yieldTask: async () => { if (performance.now() - yielded > 6) { await new Promise<void>(resolve => setTimeout(resolve, 0)); yielded = performance.now(); } },
-    }).then(index => { if (!valid(active)) return; active.stroke = createSplatMaskStroke(index, settings, id => maskValue(context.mask, id), id => maskLocked(context.mask, id)); for (const pair of active.segments) active.stroke.addSegment(...pair); active.segments.length = 0; queuePreview(active); }).catch(error => fail(active, error));
+    }).then(index => {
+      if (!valid(active)) return;
+      const eligible: typeof index = selected ? {...index, query(left,top,right,bottom,visit) {
+        index.query(left,top,right,bottom,(id,x,y) => { if (selected.has(id)) visit(id,x,y); });
+      }} : index;
+      active.stroke = createSplatMaskStroke(eligible, settings, id => maskValue(context.mask, id), id => maskLocked(context.mask, id)); for (const pair of active.segments) active.stroke.addSegment(...pair); active.segments.length = 0; queuePreview(active); }).catch(error => fail(active, error));
   }
   async function end(e: PointerEvent) {
     if (resize?.pointerId === e.pointerId) { e.preventDefault(); e.stopImmediatePropagation(); const radius = resize.preview; resize = undefined; release(e.pointerId); options.onBusyChange(); options.onResize(radius); return; }

@@ -265,7 +265,7 @@ export function sceneDepthTest(pixels: Uint8Array, width: number, height: number
     if (!(u >= 0 && u < 1 && v >= 0 && v < 1 && cameraDepth > 0)) return false;
     const x = Math.floor(u*width), y = height - 1 - Math.floor(v*height);
     const surface = data.getFloat32(4*(y*width+x), true);
-    return surface > 0 && cameraDepth <= surface + Math.max(.0001, surface * .0005);
+    return surface > 0 && Math.abs(cameraDepth - surface) <= Math.max(.0001, surface * .0005);
   };
 }
 

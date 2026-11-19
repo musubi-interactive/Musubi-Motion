@@ -1,3 +1,4 @@
+import { propertyInteraction } from "./property-interaction.ts";
 import { previewWeightCleanup, type CleanupOperation } from "./skin-weight-mirror.ts";
 import type { CleanupContext } from "./skin-weight-smoothing.ts";
 import { commitWeightRows, setInfluenceLock } from "./skin-weights.ts";
@@ -44,6 +45,19 @@ export function createWeightCleanupPanel(store: SceneStore, options: Options) {
     apply.disabled = cancel.disabled = true; preview.disabled = false; status.textContent = "";
   }
   function report(error: unknown) { status.textContent = error instanceof Error ? error.message : String(error); }
+  for (const field of [radius,strength]) {
+    field.style.textAlign = "right";
+    let initial = field.value;
+    field.onfocus = () => { initial = field.value; };
+    field.onkeydown = e => {
+      if (e.key === "Enter" || e.key === "Escape") {
+        e.preventDefault(); e.stopPropagation(); if (e.key === "Escape") field.value = initial;
+        field.blur();
+      }
+    };
+    propertyInteraction(field, () => "weight-cleanup-" + (field === radius ? "distance" : "strength"), field.parentElement!);
+    field.onchange = discard;
+  }
   lock.onchange = () => { try { setInfluenceLock(store, options.shape().id, options.joint(), lock.checked); } catch(error) { report(error); } };
   button("[data-pair]").onclick = () => {
     discard(); const a = first.value, b = second.value;
