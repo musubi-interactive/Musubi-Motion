@@ -17,8 +17,8 @@
 * { box-sizing: border-box; }
 body { margin: 0; }
 a { color: inherit; }
-button, input { font: inherit; color: inherit; }
-button, input[type="number"], input[type="color"] {
+button, input, select { font: inherit; color: inherit; }
+button, input[type="number"], input[type="color"], input[type="text"], select {
   border: 1px solid var(--border);
   border-radius: 3px;
   min-height: 27px;
@@ -29,8 +29,10 @@ button:disabled { opacity: 0.48; }
 button:not(:disabled):hover { border-color: var(--muted); }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 input[type="number"] { background: var(--input); padding: 2px 5px; width: 100%; text-align: right; }
+input[type="text"], select { background: var(--input); padding: 2px 5px; width: 100%; min-width: 0; }
 input[type="color"] { background: var(--input); padding: 2px; width: 100%; cursor: pointer; }
-input[type="range"] { accent-color: var(--muted); min-width: 36px; }
+input[type="range"], input[type="checkbox"] { accent-color: var(--muted); }
+input[type="range"] { min-width: 36px; }
 .toolbar, .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .toolbar { padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .home { color: var(--muted); }
@@ -53,6 +55,13 @@ fieldset { margin: 0 0 8px; padding: 4px 7px 7px; min-width: 0; border: 1px soli
 fieldset:last-child { margin-bottom: 0; }
 legend { padding: 0 4px; color: var(--muted); }
 .field { display: grid; grid-template-columns: minmax(0, 1fr) 88px; align-items: center; gap: 8px; margin-top: 4px; }
+.settings select { text-overflow: ellipsis; }
+.stage-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 5px 0; }
+.stage-actions button { padding-inline: 6px; }
+.stage-name { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; }
+.stage-enable { display: flex; align-items: center; gap: 4px; margin: 6px 0; }
+.stage-budget { color: var(--muted); margin: 5px 0 0; }
+#stage-solo[aria-pressed="true"] { background: var(--text); color: var(--panel); }
 @media (max-width: 700px) {
   .workbench { grid-template-columns: minmax(0, 1fr); }
   .viewport { height: clamp(210px, 50vh, 510px); }

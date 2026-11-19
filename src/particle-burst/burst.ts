@@ -70,12 +70,22 @@ export type BurstSnapshot = {
   opacities: Float32Array;
 };
 
+export function createBurstSnapshot(capacity: number): BurstSnapshot {
+  return {
+    count: 0,
+    positions: new Float32Array(capacity * 3),
+    colors: new Float32Array(capacity * 3),
+    diameters: new Float32Array(capacity),
+    opacities: new Float32Array(capacity),
+  };
+}
+
 function colorChannels(hex: string) {
   const rgb = Number.parseInt(hex.slice(1), 16);
   return [(rgb >> 16) / 255, ((rgb >> 8) & 255) / 255, (rgb & 255) / 255];
 }
 
-export function compileBurst(input: BurstRecipe) {
+export function compileBurst(input: BurstRecipe, startTime = 0) {
   const recipe = parseRecipe(input);
   const toRadians = Math.PI / 180;
   const azimuth = recipe.azimuth * toRadians;
@@ -105,43 +115,46 @@ export function compileBurst(input: BurstRecipe) {
 
   const birthColor = colorChannels(recipe.birthColor);
   const deathColor = colorChannels(recipe.deathColor);
-  // The caller consumes these buffers before the next sample. Retain capacity across seeks and playback.
-  const snapshot: BurstSnapshot = {
-    count: 0,
-    positions: new Float32Array(recipe.count * 3),
-    colors: new Float32Array(recipe.count * 3),
-    diameters: new Float32Array(recipe.count),
-    opacities: new Float32Array(recipe.count),
-  };
+  const startFrame = startTime * BURST_FPS;
+  const endFrame = (startTime + recipe.duration + recipe.lifetime) * BURST_FPS;
+  const birthIntervals = Math.max(1, recipe.count - 1);
+  let ownSnapshot: BurstSnapshot | undefined;
+
+  function append(frame: number, snapshot: BurstSnapshot) {
+    if (frame < startFrame || frame >= endFrame) return;
+    let count = snapshot.count;
+    for (let index = 0; index < recipe.count; index++) {
+      // Keep lifetime comparisons in absolute frames so the endpoint stays half-open.
+      const birth = startTime + (index / birthIntervals) * recipe.duration;
+      const birthFrame = birth * BURST_FPS;
+      const deathFrame = (birth + recipe.lifetime) * BURST_FPS;
+      if (frame < birthFrame || frame >= deathFrame) continue;
+      const age = (frame - birthFrame) / BURST_FPS;
+      const ageFraction = age / recipe.lifetime;
+      const opacity = Math.fround(recipe.birthOpacity + (recipe.deathOpacity - recipe.birthOpacity) * ageFraction);
+      const diameter = Math.fround(recipe.birthDiameter + (recipe.deathDiameter - recipe.birthDiameter) * ageFraction);
+      if (opacity <= 0 || diameter <= 0) continue;
+      const from = index * 3;
+      const to = count * 3;
+      snapshot.positions[to] = recipe.originX + velocities[from] * age;
+      snapshot.positions[to + 1] = recipe.originY + velocities[from + 1] * age - 0.5 * recipe.gravity * age * age;
+      snapshot.positions[to + 2] = recipe.originZ + velocities[from + 2] * age;
+      for (let i = 0; i < 3; i++) snapshot.colors[to + i] = birthColor[i] + (deathColor[i] - birthColor[i]) * ageFraction;
+      snapshot.diameters[count] = diameter;
+      snapshot.opacities[count] = opacity;
+      count++;
+    }
+    snapshot.count = count;
+  }
 
   return {
+    append,
     sample(frame: number): BurstSnapshot {
-      if (!Number.isFinite(frame) || frame < 0 || frame > lastBurstFrame(recipe)) throw Error("Frame is outside the burst timeline.");
-      let count = 0;
-      for (let index = 0; index < recipe.count; index++) {
-        // Compute the fraction first so the last birth is exactly at duration.
-        // Compare in frames to keep the lifetime half-open across seconds conversions.
-        const birth = (index / Math.max(1, recipe.count - 1)) * recipe.duration;
-        const birthFrame = birth * BURST_FPS;
-        const deathFrame = (birth + recipe.lifetime) * BURST_FPS;
-        if (frame < birthFrame || frame >= deathFrame) continue;
-        const age = (frame - birthFrame) / BURST_FPS;
-        const ageFraction = age / recipe.lifetime;
-        const opacity = Math.fround(recipe.birthOpacity + (recipe.deathOpacity - recipe.birthOpacity) * ageFraction);
-        const diameter = Math.fround(recipe.birthDiameter + (recipe.deathDiameter - recipe.birthDiameter) * ageFraction);
-        if (opacity <= 0 || diameter <= 0) continue;
-        const from = index * 3;
-        const to = count * 3;
-        snapshot.positions[to] = recipe.originX + velocities[from] * age;
-        snapshot.positions[to + 1] = recipe.originY + velocities[from + 1] * age - 0.5 * recipe.gravity * age * age;
-        snapshot.positions[to + 2] = recipe.originZ + velocities[from + 2] * age;
-        for (let i = 0; i < 3; i++) snapshot.colors[to + i] = birthColor[i] + (deathColor[i] - birthColor[i]) * ageFraction;
-        snapshot.diameters[count] = diameter;
-        snapshot.opacities[count] = opacity;
-        count++;
-      }
-      snapshot.count = count;
-      return snapshot;
+      if (!Number.isFinite(frame) || frame < 0 || frame > Math.ceil(endFrame)) throw Error("Frame is outside the burst timeline.");
+      ownSnapshot ??= createBurstSnapshot(recipe.count);
+      ownSnapshot.count = 0;
+      append(frame, ownSnapshot);
+      return ownSnapshot;
     },
   };
 }

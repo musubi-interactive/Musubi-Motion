@@ -3,7 +3,8 @@ import {
   Scene, ShaderMaterial, Vector3, WebGLRenderer,
 } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { numbers, type BurstSnapshot } from "./burst.ts";
+import type { BurstSnapshot } from "./burst.ts";
+import { MAX_COMPOUND_BIRTHS } from "./compound.ts";
 
 const vertexShader = [
   "attribute float diameter;",
@@ -49,7 +50,7 @@ export function createBurstPreview(host: HTMLElement) {
   controls.update();
 
   const geometry = new BufferGeometry();
-  const buffer = (width: number) => new BufferAttribute(new Float32Array(numbers.count.max * width), width).setUsage(DynamicDrawUsage);
+  const buffer = (width: number) => new BufferAttribute(new Float32Array(MAX_COMPOUND_BIRTHS * width), width).setUsage(DynamicDrawUsage);
   const position = buffer(3), color = buffer(3), diameter = buffer(1), opacity = buffer(1);
   geometry.setAttribute("position", position);
   geometry.setAttribute("rgb", color);
