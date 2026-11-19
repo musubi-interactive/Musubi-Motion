@@ -577,6 +577,9 @@ function mountCurveEditors<Clipboard>(store: SceneStore, options: EditorOptions,
   function refresh() {
     const doc=store.getState().document,selection=options.getSelection().join("|");
     updateDriver();
+    if (lastDocument !== doc && isolatedTrack && !animation().tracks.some(t => t.id === isolatedTrack)) {
+      isolatedTrack = ""; selectedObjectsOnly = false; selectionCheckbox.checked = false;
+    }
     if(lastDocument!==doc||lastSelection!==selection){
       const existing=new Set(animation().tracks.flatMap(t=>t.keys.map(k=>k.id)));selected=new Set([...selected].filter(id=>existing.has(id)));
       lastDocument=doc;lastSelection=selection;

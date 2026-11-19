@@ -1,4 +1,5 @@
 import { SPLAT_MORPH_WEIGHT_LIMIT } from "./splat-morph.ts";
+import { preflightSplatCurveEdit } from "./splat-curve-preflight.ts";
 import { applyDeformerTracks, deformerTrackRows } from "./splat-deformer-tracks.ts";
 import { assertSplatDeformerUndoFits, trimSplatDeformerHistory } from "./splat-deformer-history.ts";
 import { isDiscreteAttribute, validDiscreteValue } from "./custom-attribute-types.ts";
@@ -509,11 +510,11 @@ function saveAnimation(store: SceneStore, animation: AnimationData, editLabel: s
   for (const track of doc.animation?.tracks ?? []) if (customAttribute(doc, track.targetId, track.channel)?.locked && !animation.tracks.some(item => item.id === track.id)) throw Error("Unlock the attribute before deleting its curve.");
   validateAnimation(animation, doc);
   validateParticleEmitters({ ...doc, animation });
-  if (JSON.stringify(doc.animation ?? defaultAnimation()) === JSON.stringify(animation)) {
-    if (doc !== store.getState().document) store.setState({ document: doc, editLabel });
-    return;
-  }
-  store.setState({ document: { ...doc, animation }, editLabel });
+  const before = store.getState().document;
+  const next = JSON.stringify(doc.animation ?? defaultAnimation()) === JSON.stringify(animation) ? doc : { ...doc, animation };
+  if (next === before) return;
+  if (store.preflightSplatCurves) preflightSplatCurveEdit(before, next, store.preflightSplatCurves);
+  store.setState({ document: next, editLabel });
 }
 export function channelsForTarget(doc: SceneDocument, id: string): AnimationChannel[] {
   const node = doc.nodes[id], joint = doc.joints?.find(joint => joint.id === id), handle = doc.ikHandles?.find(handle => handle.id === id);

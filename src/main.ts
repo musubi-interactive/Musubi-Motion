@@ -1,3 +1,4 @@
+import { splatCurveProbeFrames } from "./splat-curve-preflight.ts";
 import { selectedPointPose, transformSelectedPoints } from "./splat-point-selection.ts";
 import { assertSplatDeformerUndoFits, trimSplatDeformerHistory } from "./splat-deformer-history.ts";
 import { createSplatControlOverlay, splatCageControlLayout } from "./splat-control-overlay.ts";
@@ -283,7 +284,12 @@ async function start() {
   const orthographic = new THREE.OrthographicCamera(-4,4,4,-4,.01,1000);
   let camera:THREE.PerspectiveCamera|THREE.OrthographicCamera=perspective;
   let activeView:ViewName="perspective", gizmosVisible=true, jointsVisible=true;
-  const store = createSceneStore();
+  const store = createSceneStore(undefined, (candidate, shape, probes) => {
+    const current = timelinePanel?.turntable ? animationSettings().start : getFrame();
+    // Prepare the displayed pose last so publication reuses the verified candidate.
+    for (const frame of splatCurveProbeFrames(shape, probes, current)) preflightDeformerPose(candidate, shape, frame);
+    preflightDeformerPose(candidate, shape, current);
+  });
   // GPU objects and asset bytes are excluded from the document and undo snapshots.
   const runtime = new Map<string, RuntimeObject>();
   const assetFiles = new Map<string, File>();
@@ -2213,6 +2219,15 @@ async function start() {
   });
   splatPanel.element.querySelector(".splat-transform-fields")!.before(splatSoftPanel.element);
   workspace.registerPanel("splat-components", "Splat Components", splatPanel.element);
+  function preflightDeformerPose(doc: SceneDocument, shape: SplatShapeNode, frame: number) {
+    const object = runtime.get(shape.parentId);
+    if (object?.kind !== "splat" || !object.transforms) throw Error("Load the original splats before editing a deformer.");
+    try {
+      object.transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame, timelineSplatMorphPose(doc, shape, frame));
+    } catch (error) {
+      throw Error(`Frame ${Number(frame.toFixed(4))}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   deformerPanel = createSplatDeformerPanel(store, {
     context() {
       const context = selectedSplatMaskContext();
@@ -2245,10 +2260,8 @@ async function start() {
     canKey: () => !timelinePanel?.turntable && store.getState().document.animation?.activeLayerId === undefined,
     autoKey: () => timelinePanel?.autoKey ?? false,
     preflight(shape) {
-      const object = runtime.get(shape.parentId);
-      if (object?.kind !== "splat" || !object.transforms) throw Error("Load the original splats before editing a deformer.");
       const frame = timelinePanel?.turntable ? animationSettings().start : getFrame();
-      object.transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame, timelineSplatMorphPose(store.getState().document, shape, frame));
+      preflightDeformerPose(store.getState().document, shape, frame);
     },
     onPreview() { updateBindings(); refreshGizmo(); },
     onHandleChange() { refreshGizmo(); },

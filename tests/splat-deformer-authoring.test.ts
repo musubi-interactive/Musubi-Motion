@@ -7,10 +7,67 @@ import { createSceneStore } from "../src/scene-store.ts";
 import { editingTracks, setKeys, moveKeys, deleteKeys, patchKeys, pasteKeys, copyKeys, scaleKeys, insertKey, evaluateCurve } from "../src/animation.ts";
 import { rebindLattice } from "../src/splat-lattice-rebind.ts";
 import { resizeSplatLattice, prepareSplatLattice, latticeSplatDeformer, type SplatLattice } from "../src/splat-lattice.ts";
-import { sampleSplatDeformer, type SplatDeformer } from "../src/splat-deformers.ts";
+import { timelineSplatMorphPose } from "../src/splat-morph-animation.ts";
+import { prepareSplatMorphPose } from "../src/splat-morph.ts";
+import { evaluateSplatDeformers, prepareSplatDeformerEvaluation, sampleSplatDeformer, type SplatDeformer } from "../src/splat-deformers.ts";
+import { splatCurveProbeFrames } from "../src/splat-curve-preflight.ts";
 import { selectedPointPose, transformSelectedPoints, latticePointGroup } from "../src/splat-point-selection.ts";
 
 describe("PR43 curves in the native time editors", () => {
+  it("rejects a collapsed future lattice key before publishing mixed edits or adding history", async () => {
+    const { scene } = await decodeProject(new Uint8Array(await readFile("examples/animated-splat-deformers.msb")));
+    const shape = scene.nodes["tower-shape"];
+    if (shape.type !== "splatShape") throw Error("shape");
+    const lattice = resizeSplatLattice([0,0,0], [2,2,2], [2,2,2]);
+    const window = [0, 10];
+    const deformer: SplatDeformer = { ...shape.deformers![0], kind: "lattice", params: lattice, envelope: 1, weights: [{ index: 0, weight: 1 }],
+      keys: lattice.offsets.flatMap((_, i) => window.map(frame => ({ frame, channel: `point.${i}.x`, value: i % 2 ? 1 : -1 }))) };
+    const doc = { ...scene, nodes: { ...scene.nodes, [shape.id]: { ...shape, deformers: [deformer] } } };
+    const checked: number[] = [];
+    const store = createSceneStore(doc, (candidate, changed, probes) => {
+      expect(candidate.animation!.tracks.find(t => t.channel === "position.x")!.keys[0].value).toBe(0);
+      for (const frame of [0, ...splatCurveProbeFrames(changed, probes, 0)]) {
+        checked.push(frame);
+        evaluateSplatDeformers(changed.deformers!, [], undefined, frame, (_, center) => { center.set(0,0,0); return .01; });
+      }
+    });
+    setKeys(store, ["tower"], 10, undefined, ["position.x"]);
+    const before = store.getState().document, undo = store.temporal.getState().pastStates;
+    const ids = editingTracks(before).flatMap(t => t.keys.filter(k => k.time === 10).map(k => k.id));
+    expect(() => patchKeys(store, ids, { value: 0 })).toThrow(/collapsed/);
+    expect(checked).toContain(10);
+    expect(store.getState().document).toBe(before);
+    expect(store.temporal.getState().pastStates).toBe(undo);
+  });
+  it("preflights facial key geometry on splats without stack entries and bypasses ordinary pose edits", async () => {
+    const { scene } = await decodeProject(new Uint8Array(await readFile("examples/animated-splat-deformers.msb")));
+    const shape = scene.nodes["tower-shape"];
+    if (shape.type !== "splatShape") throw Error("shape");
+    const facial = { ...shape, deformers: undefined, morphTargets: [{ name: "Jaw", weight: 0 }],
+      morphSurface: { sourceCount: 272, vertices: [[0,0,0], [1,0,0], [0,1,0]], faces: [[272,0,1,2]], deltas: [[[0,100000,0,0]]] } } as typeof shape;
+    const doc = { ...scene, nodes: { ...scene.nodes, [shape.id]: facial } };
+    const checked: number[] = [];
+    const store = createSceneStore(doc, (candidate, changed, probes) => {
+      for (const frame of splatCurveProbeFrames(changed, probes, 0)) {
+        checked.push(frame);
+        const pose = timelineSplatMorphPose(candidate, changed, frame)!;
+        const morph = prepareSplatMorphPose(pose);
+        const compiled = prepareSplatDeformerEvaluation([], [], undefined, frame, (_, p) => { p.set(0,0,0); return .01; }, 272, morph);
+        compiled.matrix(0);
+      }
+    });
+    setKeys(store, ["tower"], 15, undefined, ["position.x"]);
+    expect(checked).toEqual([]);
+    setKeys(store, ["tower"], 10, undefined, ["morph.0"]);
+    const before = store.getState().document;
+    const key = editingTracks(before).find(t => t.channel === "morph.0")!.keys[0];
+    expect(() => patchKeys(store, [key.id], { value: 10000 })).toThrow(/out-of-range/);
+    expect(checked).toContain(10);
+    expect(store.getState().document).toBe(before);
+    const probes = { edited: new Set(Array.from({ length: 4096 }, (_, i) => i)), neighboring: new Set<number>() };
+    const chosen = splatCurveProbeFrames({ ...facial, morphSurface: { ...facial.morphSurface!, sourceCount: 100000 } }, probes, 3);
+    expect([...chosen]).toEqual([0, 4095]);
+  });
   it("keeps keys on duplicated splats independent of their source", async () => {
     const { scene } = await decodeProject(new Uint8Array(await readFile("examples/animated-splat-deformers.msb")));
     const source = scene.nodes["tower-shape"];

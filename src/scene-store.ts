@@ -1,3 +1,4 @@
+import type { SplatCurveProbes } from "./splat-curve-preflight.ts";
 import { createStore } from "zustand/vanilla";
 import { temporal } from "zundo";
 import {
@@ -5,17 +6,20 @@ import {
   normalizedChannels,
   uniqueName,
 } from "./scene-document.ts";
-import type { SceneDocument, TransformChannels } from "./scene-document.ts";
+import type { SceneDocument, SplatShapeNode, TransformChannels } from "./scene-document.ts";
 
 type EditorState = { document: SceneDocument; editLabel: string };
 
-export function createSceneStore(initial = emptyScene()) {
-  return createStore<EditorState>()(
+type SplatCurvePreflight = (candidate: SceneDocument, shape: SplatShapeNode, probes: SplatCurveProbes) => void;
+
+export function createSceneStore(initial = emptyScene(), preflightSplatCurves?: SplatCurvePreflight) {
+  const store = createStore<EditorState>()(
     temporal(() => ({ document: initial, editLabel: "Initial scene" }), {
       limit: 100,
       equality: (before, after) => before.document === after.document,
     }),
   );
+  return Object.assign(store, { preflightSplatCurves });
 }
 export type SceneStore = ReturnType<typeof createSceneStore>;
 
