@@ -22,6 +22,8 @@ import { createProceduralGraphPanel } from "./procedural-graph-panel.ts";
 import { createTextureAssetsPanel } from "./texture-assets-panel.ts";
 import { createMaterialPanel } from "./material-panel.ts";
 import { collectEmbeddedTextures, validateTextureDecoding, type TextureAsset } from "./texture-assets.ts";
+import { splatMorphPose, validateSplatMorphs } from "./splat-morph.ts";
+import { timelineSplatMorphPose } from "./splat-morph-animation.ts";
 import { meshToSplatData } from "./mesh-to-splats";
 import { createMeshSplatColors } from "./mesh-splat-colors";
 import { cubeToSplatBytes, cubeSplatFaces } from "./cube-to-splats";
@@ -85,7 +87,7 @@ import type WaDropdown from "@awesome.me/webawesome/dist/components/dropdown/dro
 import type WaDialog from "@awesome.me/webawesome/dist/components/dialog/dialog.js";
 import packageInfo from "../package.json";
 import "./style.css";
-import { defaultAnimation, editingTracks, evaluateChannels, evaluateSceneAnimation, keyChannels, setKeys, type AnimationPose } from "./animation.ts";
+import { POSE_ANIMATION_CHANNELS, defaultAnimation, editingTracks, evaluateChannels, evaluateSceneAnimation, keyChannels, setKeys, type AnimationPose } from "./animation.ts";
 import { evaluateDrivenKeys } from "./driven-keys.ts";
 import { mountTimeline } from "./timeline-panel.ts";
 import { advanceFrame } from "./animation-playback.ts";
@@ -782,7 +784,8 @@ async function start() {
       root.add(preview);
       const transforms = createSplatTransformRuntime(mesh);
       object = { kind: "splat", root, preview, box, mesh, ...data, assetId: result.assetId, transforms };
-      transforms.update(result.shape.componentTransforms, result.shape.deformers, result.shape.scalarMasks, timelinePanel?.turntable ? animationSettings().start : getFrame());
+      const frame = timelinePanel?.turntable ? animationSettings().start : getFrame();
+      transforms.update(result.shape.componentTransforms, result.shape.deformers, result.shape.scalarMasks, frame, timelineSplatMorphPose(result.document, result.shape, frame));
       transforms.setBound(!!result.shape.binding);
       if (transforms.value) object.transformedBounds = transforms.bounds(index => index < data.count);
       if (result.shape.binding) skin = createBinding(mesh, result.shape.binding, undefined, before.joints, transforms);
@@ -1066,7 +1069,7 @@ async function start() {
       const frame = timelinePanel?.turntable ? animationSettings().start : getFrame();
       let transformChanged = false;
       try {
-        transformChanged = transforms.update(transformValue, deformerPanel?.deformersForShape(shape) ?? shape.deformers, shape.scalarMasks, frame);
+        transformChanged = transforms.update(transformValue, deformerPanel?.deformersForShape(shape) ?? shape.deformers, shape.scalarMasks, frame, splatMorphPose(shape, evaluated.get(shape.parentId)?.morphWeights));
       } catch (error) {
         notice.textContent = (error as Error).message;
         transformChanged = transforms.update(transformValue);
@@ -1620,7 +1623,7 @@ async function start() {
     const emitters = new Set(Object.values(doc.nodes).filter(node => node.type === "particleShape").map(node => node.parentId));
     panel.update([...transformNodes(doc).map(node => ({ ...node, curve: curves.has(node.id), mesh: meshes.has(node.id), particle: emitters.has(node.id) })), ...jointNodes], new Set(ids), shape?.name, preview ?? (ids.length === 1 ? currentPose(ids[0]) : undefined));
     elasticityPanel.update(shape?.type === "splatShape" ? shape : undefined, new Map((doc.joints??[]).map(j=>[j.id,j.name])));
-    morphPanel?.update(shape?.type === "meshShape" ? shape : undefined);
+    morphPanel?.update(shape?.type === "meshShape" || shape?.type === "splatShape" ? shape : undefined);
     channelKeys?.refresh();
     customPanel?.refresh();
     splatMaskPanel?.refresh();
@@ -2159,7 +2162,7 @@ async function start() {
       const object = runtime.get(shape.parentId);
       if (object?.kind !== "splat" || !object.transforms) throw Error("Load the original splats before editing a deformer.");
       const frame = timelinePanel?.turntable ? animationSettings().start : getFrame();
-      object.transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame);
+      object.transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame, timelineSplatMorphPose(store.getState().document, shape, frame));
     },
     onPreview() { updateBindings(); refreshGizmo(); },
     onHandleChange() { refreshGizmo(); },
@@ -3393,15 +3396,16 @@ async function start() {
           if (shape.componentEdits) validateSplatComponentEdits(shape.componentEdits, data.count);
           if (shape.componentTransforms) validateSplatComponentTransforms(shape.componentTransforms, data.count);
           validateShapeDeformers(shape, data.count);
+          validateSplatMorphs(shape, data.count);
           validateSplatMaskCollections(shape, data.count);
           validateSplatAppearance(shape, data.count);
           validateSplatAttributePaint(shape, data.count);
           if (shape.binding) validateSkinWeightCount(shape.binding, mesh.numSplats);
-          if (shape.deformers?.length) {
+          if (shape.deformers?.length || shape.morphSurface) {
             transforms = createSplatTransformRuntime(mesh);
             const settings = project.scene.animation ?? defaultAnimation();
             for (const frame of new Set([0, settings.start, project.editor.time * settings.fps])) {
-              transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame);
+              transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame, timelineSplatMorphPose(project.scene, shape, frame));
             }
           }
           const root = new THREE.Group(),
@@ -3604,8 +3608,11 @@ async function start() {
       }
       const shape = Object.values(added.document.nodes).find((n): n is SplatShapeNode => n.type === "splatShape" && n.parentId === node.id)!;
       shape.binding = binding;
-      if (doc.animation) added.document.animation = { ...doc.animation, tracks: [...doc.animation.tracks, ...doc.animation.tracks.filter(t => t.targetId === sourceNode.id && t.channel !== "visibility" && !t.channel.startsWith("morph.")).map(t => ({ ...t, id: crypto.randomUUID(), targetId: node.id, keys: t.keys.map(k => ({ ...k, id: crypto.randomUUID() })) }))] };
+      if (generated.morphSurface) { shape.morphSurface = generated.morphSurface; shape.morphTargets = generated.morphTargets; }
+      if (doc.animation) added.document.animation = { ...doc.animation, tracks: [...doc.animation.tracks, ...doc.animation.tracks.filter(t => t.targetId === sourceNode.id && ((POSE_ANIMATION_CHANNELS as readonly string[]).includes(t.channel) && t.channel !== "visibility" || !!shape.morphSurface && t.channel.startsWith("morph."))).map(t => ({ ...t, id: crypto.randomUUID(), targetId: node.id, keys: t.keys.map(k => ({ ...k, id: crypto.randomUUID() })) }))] };
       if (node.parentId) added.document.rootIds = added.document.rootIds.filter(id => id !== node.id);
+      validateScene(added.document);
+      if (doc !== store.getState().document) throw Error("The scene changed during conversion. Try again.");
       const root = new THREE.Group(), preview = new THREE.Group(), box = new THREE.Box3Helper(new THREE.Box3(), 0x999999);
       preview.add(candidate); root.add(preview); box.visible = false;
       runtime.set(node.id, { kind: "splat", root, preview, mesh: candidate, box, assetId: asset.id, ...data });

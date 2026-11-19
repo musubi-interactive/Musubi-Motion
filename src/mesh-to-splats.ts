@@ -1,3 +1,4 @@
+import { buildSplatMorphSurface } from "./splat-morph.ts";
 import { Color, Matrix4, Quaternion, Vector3 } from "three";
 import { triangulateMesh, validateMeshShape } from "./mesh-modeling";
 import { validateMeshSkin } from "./mesh-skin";
@@ -15,7 +16,7 @@ function radical(n: number, base: number) { let result = 0, f = 1/base; while(n)
 /** Sample undeformed geometry, retaining stable order for the persisted bone weights. */
 export function meshToSplatData(shape: MeshShapeNode, settings: CubeSplatSettings, count: number, colorAt?: (sample: SurfaceSample) => Color | { color: Color; opacity: number }) {
   validateMeshShape(shape); validateMeshSkin(shape);
-  if (shape.morphTargets?.length) throw Error("Blend shapes are not supported by mesh conversion yet.");
+  const runs: { end: number; ids: readonly string[] }[] = [];
   if (!Number.isInteger(count) || count < 256 || count > 100000) throw Error("Choose between 256 and 100,000 splats per part.");
   if (![settings.overlap,settings.thickness,settings.opacity].every(Number.isFinite) || settings.overlap < .3 || settings.overlap > 1.2 || settings.thickness < .01 || settings.thickness > .5 || settings.opacity < .1 || settings.opacity > 1) throw Error("Invalid splat settings.");
   if (shape.skin && shape.skin.jointIds.length > 256) throw Error("Splat skinning supports at most 256 joints per part.");
@@ -50,9 +51,16 @@ export function meshToSplatData(shape: MeshShapeNode, settings: CubeSplatSetting
     [q.w,q.x,q.y,q.z].forEach((value,j)=>{bytes[offset+28+j]=Math.max(0,Math.min(255,Math.round(value*128+128)));});
     if(shape.skin) overrides[String(retained)] = interpolateSplatWeights(shape,sample);
     retained++;
+    if (shape.morphTargets?.length) {
+      if (runs.at(-1)?.ids === t.vertices) runs[runs.length - 1].end = retained;
+      else runs.push({ end: retained, ids: t.vertices });
+    }
   }
   if (!retained) throw Error("No visible surface samples remain after opacity and alpha cutoff. Check the material or increase the sample budget.");
   const binding: SkinBinding | undefined = shape.skin ? {meshSpace:true,jointIds:[...shape.skin.jointIds],restMatrices:shape.skin.inverseBindMatrices.map(m=>new Matrix4().fromArray(m).invert().toArray()),weights:{count:retained,overrides}} : undefined;
   if(binding) validateSkinWeights(binding);
-  return {bytes:bytes.slice(0,retained*32),binding};
+  return {bytes:bytes.slice(0,retained*32),binding, ...(runs.length ? {
+    morphSurface: buildSplatMorphSurface(shape, runs),
+    morphTargets: shape.morphTargets!.map(({name, weight}) => ({ name, weight })),
+  } : {})};
 }

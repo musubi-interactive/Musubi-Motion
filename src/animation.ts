@@ -31,11 +31,12 @@ export type AnimationLayer = { weightTrack?: LayerWeightTrack; id: string; name:
 export type AnimationData = { fps: number; start: number; end: number; loop: boolean; tracks: AnimationTrack[]; layers?: AnimationLayer[]; activeLayerId?: string };
 export type AnimationPose = TransformChannels & { visibility: number; morphWeights?: number[]; customValues?: Record<string, number> };
 export const isAnimationChannel = (channel: string): channel is AnimationChannel => (ANIMATION_CHANNELS as readonly string[]).includes(channel) || isCustomChannel(channel) || /^morph\.(0|[1-9][0-9]{0,2})$/.test(channel);
-const morphDefaultsCache = new WeakMap<SceneDocument, ReadonlyMap<string, import("./scene-document.ts").MeshShapeNode>>();
+type MorphShapeNode = import("./scene-document.ts").MeshShapeNode | import("./scene-document.ts").SplatShapeNode;
+const morphDefaultsCache = new WeakMap<SceneDocument, ReadonlyMap<string, MorphShapeNode>>();
 function morphDefaults(doc: SceneDocument, id: string) {
   let shapes = morphDefaultsCache.get(doc);
   if (!shapes) {
-    shapes = new Map(Object.values(doc.nodes).filter((n): n is import("./scene-document.ts").MeshShapeNode => n.type === "meshShape" && !!n.morphTargets?.length).map(n => [n.parentId, n]));
+    shapes = new Map(Object.values(doc.nodes).filter((n): n is MorphShapeNode => (n.type === "splatShape" || n.type === "meshShape") && !!n.morphTargets?.length).map(n => [n.parentId, n]));
     morphDefaultsCache.set(doc, shapes);
   }
   return shapes.get(id);

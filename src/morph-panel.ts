@@ -1,12 +1,13 @@
 import { evaluateChannels, setKeys, type AnimationChannel } from "./animation.ts";
-import type { MeshShapeNode } from "./scene-document.ts";
+import type { MeshShapeNode, SplatShapeNode } from "./scene-document.ts";
 import type { SceneStore } from "./scene-store.ts";
 
 export function createMorphPanel(host: HTMLElement, store: SceneStore, options: { getFrame(): number; available(): boolean; canKey(): boolean; onStatus(message: string): void }) {
   const element = document.createElement("section"); element.className = "morph-panel"; host.append(element);
-  let shape: MeshShapeNode | undefined, signature = "";
+  type Shape = MeshShapeNode | SplatShapeNode;
+  let shape: Shape | undefined, signature = "";
   const inputs: HTMLInputElement[] = [], keys: HTMLButtonElement[] = [];
-  function update(next: MeshShapeNode | undefined) {
+  function update(next: Shape | undefined) {
     shape = next; element.hidden = !shape?.morphTargets?.length;
     const nextSignature = JSON.stringify([shape?.id, shape?.morphTargets?.map(m => m.name)]);
     if (signature !== nextSignature) {
@@ -21,13 +22,20 @@ export function createMorphPanel(host: HTMLElement, store: SceneStore, options: 
           if (!shape || !options.available()) return;
           try {
             const value = Number(input.value); if (!Number.isFinite(value) || Math.abs(value) > 1e6) throw Error("Enter a finite blend-shape weight within ±1,000,000.");
-            const doc = store.getState().document, current = doc.nodes[shape.id] as MeshShapeNode, channel = `morph.${index}` as AnimationChannel;
+            const doc = store.getState().document, current = doc.nodes[shape.id] as Shape, channel = `morph.${index}` as AnimationChannel;
             const animated = doc.animation?.tracks.some(t => t.targetId === current.parentId && t.channel === channel);
             if (keyed || animated) {
               if (!options.canKey()) throw Error("Switch to Animation mode to key blend shapes.");
               const pose = evaluateChannels(doc, current.parentId, options.getFrame()); pose.morphWeights![index] = value;
               setKeys(store, [current.parentId], options.getFrame(), new Map([[current.parentId, pose]]), [channel]);
-            } else store.setState({ document: { ...doc, nodes: { ...doc.nodes, [current.id]: { ...current, morphTargets: current.morphTargets!.map((target, i) => i === index ? { ...target, weight: value } : target) } } }, editLabel: "Edit blend shape" });
+            } else {
+              const updateWeight = <T extends { weight: number }>(targets: T[]) =>
+                targets.map((target, i) => i === index ? { ...target, weight: value } : target);
+              const changed = current.type === "meshShape"
+                ? { ...current, morphTargets: updateWeight(current.morphTargets!) }
+                : { ...current, morphTargets: updateWeight(current.morphTargets!) };
+              store.setState({ document: { ...doc, nodes: { ...doc.nodes, [current.id]: changed } }, editLabel: "Edit blend shape" });
+            }
             options.onStatus("");
           } catch (error) { options.onStatus(error instanceof Error ? error.message : String(error)); }
         }

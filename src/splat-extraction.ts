@@ -1,3 +1,4 @@
+import { subsetSplatMorphSurface } from "./splat-morph.ts";
 import { validateSceneSplatDeformers } from "./splat-deformers.ts";
 import { ExtSplats, SplatMesh, utils } from "@sparkjsdev/spark";
 import { POSE_ANIMATION_CHANNELS, type PoseAnimationChannel } from "./animation.ts";
@@ -230,6 +231,10 @@ export function addSplatExtraction(doc: SceneDocument, identity: SplatSelectionI
       data: encodeMaskData(ids.length, fallback, values), componentLocks: remapRanges(mask.componentLocks),
     };
   });
+  if (source.morphSurface) {
+    shape.morphTargets = structuredClone(source.morphTargets);
+    shape.morphSurface = subsetSplatMorphSurface(source.morphSurface, ids);
+  }
   if (source.deformers?.length) {
     const deformers = source.deformers.flatMap(node => {
       const weights = node.weights?.flatMap(entry => {
@@ -260,7 +265,7 @@ export function addSplatExtraction(doc: SceneDocument, identity: SplatSelectionI
     assets: { ...doc.assets, [assetId]: { id: assetId, kind: "file", fileName: SPLAT_EXTRACTION_NAME, byteLength: size } },
   };
   const tracks = doc.animation?.tracks.filter(track =>
-    track.targetId === owner.id && POSE_ANIMATION_CHANNELS.includes(track.channel as PoseAnimationChannel));
+    track.targetId === owner.id && (POSE_ANIMATION_CHANNELS.includes(track.channel as PoseAnimationChannel) || !!shape.morphSurface && track.channel.startsWith("morph.")));
   if (doc.animation && tracks?.length) document.animation = {
     ...doc.animation,
     tracks: [...doc.animation.tracks, ...tracks.map(track => ({
