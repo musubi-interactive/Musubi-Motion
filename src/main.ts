@@ -119,6 +119,7 @@ import { validateSkinWeightCount, editSkinWeightValues } from "./skin-weights.ts
 import { createSkinWeightsPanel } from "./skin-weights-panel.ts";
 import { createSkinWeightPreview } from "./skin-weight-preview.ts";
 import { assertSplatTransformUndoFits, captureSplatComponentTransform, trimSplatTransformHistory, transformGaussianTRS, validateSplatComponentTransforms, withSplatComponentTransforms, type SplatComponentTransforms } from "./splat-component-transforms.ts";
+import { stageSplatTimelineFrame, type SplatFrameJob } from "./splat-timeline.ts";
 import { createSplatTransformRuntime, type SplatTransformRuntime } from "./splat-transform-runtime.ts";
 import { combineWeightedSplatSelection, defaultSplatSoftSettings, hardSplatSelection, selectSplatRadial, selectSplatSphere, splatSelectionWeight, splatSoftCoreFraction, validateSplatSoftSettings, validateWeightedSplatSelection, type SplatSoftSettings, type WeightedSplatSelection } from "./splat-soft-selection.ts";
 import { createSplatSoftPreview } from "./splat-soft-selection-preview.ts";
@@ -481,45 +482,41 @@ async function start() {
     if (pendingTime?.seconds === seconds) return;
     cancelPendingTime();
     const doc = store.getState().document, frame = seconds * animationSettings().fps;
-    const jobs = [];
+    const jobs: SplatFrameJob[] = [];
     for (const shape of Object.values(doc.nodes)) {
       if (shape.type !== "splatShape") continue;
       const animated = shape.deformers?.some(entry => entry.keys?.length);
       const visits = (animated ? shape.deformers!.reduce((n, entry) => n + (entry.weights?.length ?? entry.sourceCount), 0) : 0)
         + (shape.morphSurface?.sourceCount ?? 0);
-      if (visits < 12000) continue;
+      if (!animated && !shape.morphSurface) continue;
       const object = runtime.get(shape.parentId);
-      if (object?.kind === "splat" && object.transforms) jobs.push({ shape, transforms: object.transforms });
+      if (object?.kind === "splat" && object.transforms) jobs.push({ shape, transforms: object.transforms, visits, morph: timelineSplatMorphPose(doc, shape, frame) });
     }
     function publish() {
       time = seconds;
       if (stopAtEnd) setPlaying(false);
       updateTime();
     }
-    if (!jobs.length || seconds === time) { publish(); return; }
+    if (!jobs.length) { publish(); return; }
     // The viewport, picking, timeline and skinning advance together. Keep the last
     // complete frame interactive while the requested frame is staged in slices.
-    skinPoseVersion++;
+    if (seconds !== time) skinPoseVersion++;
     const controller = new AbortController(), signal = controller.signal;
     pendingTime = { seconds, controller };
-    void (async () => {
-      try {
-        for (const { shape, transforms } of jobs)
-          await transforms.prepareInteractive(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame,
-            timelineSplatMorphPose(doc, shape, frame), signal);
-        if (signal.aborted || loading || dragId || doc !== store.getState().document) return;
+    function reject(error: unknown) {
+      if (signal.aborted) return;
+      setPlaying(false);
+      notice.textContent = error instanceof Error ? error.message : String(error);
+      updateTime(false);
+    }
+    try {
+      const staged = stageSplatTimelineFrame(jobs, frame, signal, () => {
+        if (signal.aborted) return;
         pendingTime = undefined;
-        publish();
-      } catch (error) {
-        if (!signal.aborted) {
-          setPlaying(false);
-          notice.textContent = (error as Error).message;
-          updateTime(false);
-        }
-      } finally {
-        if (pendingTime?.controller === controller) pendingTime = undefined;
-      }
-    })();
+        if (!loading && !dragId && doc === store.getState().document) publish();
+      });
+      staged?.catch(reject);
+    } catch (error) { reject(error); }
   }
   function setFrame(frame: number) {
     if (!Number.isFinite(frame) || loading || dragId) return;
