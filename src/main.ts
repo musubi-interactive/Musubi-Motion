@@ -1,4 +1,5 @@
-import { assertSplatDeformerUndoFits, trimSplatDeformerHistory } from "./splat-deformer-panel.ts";
+import { selectedPointPose, transformSelectedPoints } from "./splat-point-selection.ts";
+import { assertSplatDeformerUndoFits, trimSplatDeformerHistory } from "./splat-deformer-history.ts";
 import { createSplatControlOverlay, splatCageControlLayout } from "./splat-control-overlay.ts";
 import { createSplatCageBindingPanel } from "./splat-cage-binding-panel.ts";
 import { createSplatCageFromGeometry } from "./splat-cage.ts";
@@ -1284,9 +1285,9 @@ async function start() {
   }
   // Keep the proxy in the same object-local space as the authored rest handles.
   const cageBindingPanel = createSplatCageBindingPanel({
-    rebindLattice(shapeId, id, params) {
+    rebindLattice(shapeId, id, params, reset) {
       if (loading || playing || dragId) throw Error("Finish the current edit before rebinding.");
-      deformerPanel?.replaceParams(shapeId, id, params, "Rebind splat lattice");
+      deformerPanel?.rebindLattice(shapeId, id, params, reset);
     },
     rebindCage(shapeId, id, meshId) {
       if (loading || playing || dragId) throw Error("Finish the current edit before rebinding.");
@@ -1317,7 +1318,7 @@ async function start() {
   }
   const deformerProxy = new THREE.Object3D();
   const deformerOverlay = createSplatControlOverlay(world);
-  let overlayState: { params: unknown; kind: string; index: number; matrix: THREE.Matrix4 } | undefined;
+  let overlayState: { params: unknown; kind: string; indices: string; matrix: THREE.Matrix4 } | undefined;
   function syncDeformerOverlay(handle: ReturnType<typeof currentDeformerHandle>) {
     if (!handle || !gizmosVisible || loading || playing) {
       if (overlayState) deformerOverlay.clear();
@@ -1327,11 +1328,11 @@ async function start() {
     handle.object.mesh.updateWorldMatrix(true, false);
     const matrix = handle.object.mesh.matrixWorld;
     if (overlayState?.params === handle.params && overlayState?.kind === handle.node.kind &&
-      overlayState.index === handle.index && overlayState.matrix.equals(matrix)) return;
+      overlayState.indices === handle.indices.join(",") && overlayState.matrix.equals(matrix)) return;
     const layout = splatCageControlLayout(handle.node.kind, handle.params);
-    if (layout) deformerOverlay.update(layout, matrix, handle.index);
+    if (layout) deformerOverlay.update(layout, matrix, handle.indices);
     else deformerOverlay.clear();
-    overlayState = { params: handle.params, kind: handle.node.kind, index: handle.index, matrix: matrix.clone() };
+    overlayState = { params: handle.params, kind: handle.node.kind, indices: handle.indices.join(","), matrix: matrix.clone() };
   }
   function currentDeformerHandle() {
     const selection = deformerPanel?.selectedHandle();
@@ -1350,7 +1351,7 @@ async function start() {
   let handleDrag: ReturnType<typeof currentDeformerHandle>;
   function draggedHandleParams(session: NonNullable<typeof handleDrag>) {
     if (store.getState().document !== session.doc) throw Error("The scene changed during the deformer edit.");
-    return session.adapter.set(session.params, session.index, {
+    return transformSelectedPoints(session.adapter, session.params, session.indices, {
       position: deformerProxy.position.clone(), rotation: deformerProxy.quaternion.clone(), scale: deformerProxy.scale.clone(),
     });
   }
@@ -1364,8 +1365,8 @@ async function start() {
     if (handleDrag) return;
     transform.showX = transform.showY = transform.showZ = true;
     if (handle && !playing && !loading && gizmosVisible) {
-      const pose = handle.adapter.get(handle.params, handle.index);
-      const modes = typeof handle.adapter.modes === "function" ? handle.adapter.modes(handle.index) : handle.adapter.modes;
+      const pose = selectedPointPose(handle.adapter, handle.params, handle.indices);
+      const modes = handle.indices.length > 1 ? undefined : typeof handle.adapter.modes === "function" ? handle.adapter.modes(handle.index) : handle.adapter.modes;
       if (currentMode !== "select" && (!modes || modes.includes(currentMode))) {
         if (deformerProxy.parent !== handle.object.mesh) handle.object.mesh.add(deformerProxy);
         deformerProxy.position.copy(pose.position); deformerProxy.quaternion.copy(pose.rotation); deformerProxy.scale.copy(pose.scale);
@@ -2185,7 +2186,7 @@ async function start() {
     available: () => !loading && !playing && !dragId && pendingComponentPick === undefined && !extractionRequest &&
       !splatPaintTool?.active && !splatMaskPaintTool?.busy,
     frame: () => timelinePanel?.turntable ? animationSettings().start : getFrame(),
-    canKey: () => !timelinePanel?.turntable,
+    canKey: () => !timelinePanel?.turntable && store.getState().document.animation?.activeLayerId === undefined,
     autoKey: () => timelinePanel?.autoKey ?? false,
     preflight(shape) {
       const object = runtime.get(shape.parentId);
@@ -2195,6 +2196,7 @@ async function start() {
     },
     onPreview() { updateBindings(); refreshGizmo(); },
     onHandleChange() { refreshGizmo(); },
+    onGraph(trackId) { animationEditors?.focusTrack(trackId); element("view-graph").click(); },
     onContextChange: refreshCageBinding,
   });
   workspace.registerPanel("splat-deformers", "Splat Deformers", deformerPanel.element);
@@ -2815,7 +2817,7 @@ async function start() {
     const handle = currentDeformerHandle();
     if (handle && gizmosVisible && !playing) {
       const picked = deformerOverlay.pick(camera, webgl.domElement.getBoundingClientRect(), event.clientX, event.clientY);
-      if (picked !== undefined) deformerPanel?.selectHandle(picked);
+      if (picked !== undefined) deformerPanel?.selectHandle(picked, event.shiftKey && (handle.node.kind === "lattice" || handle.node.kind === "cage"));
       return;
     }
     if (gesture?.splat || (splatComponent && currentMode !== "select")) return;

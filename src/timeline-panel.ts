@@ -67,10 +67,7 @@ export function mountTimeline(store: SceneStore, options: {
   }
   function selectionKeyFrames(selection: Set<string>) {
     const doc = store.getState().document;
-    const frames = editingTracks(doc).filter(track => selection.has(track.targetId)).flatMap(track => track.keys.map(key => key.time));
-    for (const shape of Object.values(doc.nodes)) if (shape.type === "splatShape" && selection.has(shape.parentId))
-      for (const deformer of shape.deformers ?? []) for (const key of deformer.keys ?? []) frames.push(key.frame);
-    return frames;
+    return editingTracks(doc).filter(track => selection.has(track.targetId)).flatMap(track => track.keys.map(key => key.time));
   }
   mode.onchange = () => run(options.onModeChange);
   tools.querySelector<HTMLButtonElement>('[data-action="key"]')!.onclick = () => run(options.setKey);

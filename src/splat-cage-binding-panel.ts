@@ -4,7 +4,7 @@ import { propertyInteraction } from "./property-interaction.ts";
 import { MAX_LATTICE_DIVISIONS, resizeSplatLattice, type SplatLattice } from "./splat-lattice.ts";
 
 type Actions = {
-  rebindLattice(shapeId: string, id: string, params: SplatLattice): void;
+  rebindLattice(shapeId: string, id: string, params: SplatLattice, reset: boolean): void;
   rebindCage(shapeId: string, id: string, meshId: string): void;
 };
 type ActiveBinding = { shapeId: string; id: string; kind: string; params: unknown; meshes: readonly { id: string; name: string }[] };
@@ -16,15 +16,16 @@ export function createSplatCageBindingPanel(actions: Actions) {
   element.style.cssText = "min-width:0;margin:8px 0;padding:8px;border:1px solid var(--line);border-radius:3px";
   element.hidden = true;
   element.innerHTML = `<legend>Bind Geometry</legend>
-    <div data-lattice-bind><button type="button" data-rebind-lattice>Rebind Lattice</button></div>
+    <div data-lattice-bind><label>Rebind mode <select aria-label="Lattice rebind mode"><option value="preserve">Preserve shape and keys</option><option value="reset">Reset point edits and keys</option></select></label><button type="button" data-rebind-lattice>Rebind Lattice</button></div>
     <div data-cage-bind hidden><label>Cage mesh <select aria-label="Cage mesh"></select></label>
       <button type="button" data-rebind-cage>Rebind from Mesh</button>
-      <p>Choose a closed polygon mesh with up to ${MAX_CAGE_VERTICES} unique vertices. The mesh must enclose its vertex centroid.</p></div>
-    <p>Rebinding resets point edits and keys. Enclose the splats you want the deformer to affect.</p>
+      <p>Choose a closed polygon mesh with up to ${MAX_CAGE_VERTICES} unique vertices. The mesh must enclose its vertex centroid. Mesh rebinding replaces point edits and keys.</p></div>
+
     <p role="status" data-bind-status hidden></p>`;
   const latticeGroup = element.querySelector<HTMLDivElement>("[data-lattice-bind]")!;
   const cageGroup = element.querySelector<HTMLDivElement>("[data-cage-bind]")!;
   const latticeButton = element.querySelector<HTMLButtonElement>("[data-rebind-lattice]")!;
+  const mode = latticeGroup.querySelector("select")!;
   const cageButton = element.querySelector<HTMLButtonElement>("[data-rebind-cage]")!;
   const meshSelect = cageGroup.querySelector("select")!;
   const status = element.querySelector<HTMLParagraphElement>("[data-bind-status]")!;
@@ -78,7 +79,8 @@ export function createSplatCageBindingPanel(actions: Actions) {
     for (const input of properties.flatMap(property => fields[property])) if (!input.reportValidity()) return;
     const read = (property: typeof properties[number]) => fields[property].map(input => input.valueAsNumber) as ControlPoint;
     try {
-      actions.rebindLattice(active.shapeId, active.id, resizeSplatLattice(read("center"), read("size"), read("divisions")));
+      actions.rebindLattice(active.shapeId, active.id, resizeSplatLattice(read("center"), read("size"), read("divisions")), mode.value === "reset");
+      mode.value = "preserve";
       showStatus("");
     } catch (error) { showStatus(error instanceof Error ? error.message : "Could not rebind lattice."); }
   });
@@ -113,6 +115,7 @@ export function createSplatCageBindingPanel(actions: Actions) {
       cageButton.disabled = !meshSelect.value;
       if (nextSignature === signature) return;
       signature = nextSignature;
+      mode.value = "preserve";
       showStatus("");
       if (rest) for (const property of properties) fields[property].forEach((input, axis) => { input.value = String(rest[property][axis]); });
       for (const refresh of refreshLocks) refresh();

@@ -1,3 +1,6 @@
+import { evaluateCurve, validateCurveKeys } from "./animation.ts";
+import { changedDeformerKey, deformerCurves, type SplatDeformerKey } from "./splat-deformer-curves.ts";
+export type { SplatDeformerKey } from "./splat-deformer-curves.ts";
 import { NONLINEAR_SPLAT_DEFORMERS } from "./splat-nonlinear.ts";
 import { CAGE_SPLAT_DEFORMERS } from "./splat-cage-deformers.ts";
 import { Box3, Euler, MathUtils, Matrix3, Matrix4, Quaternion, Vector3 } from "three";
@@ -6,7 +9,6 @@ import { type SplatComponentTransforms } from "./splat-component-transforms.ts";
 import { maskValue, type SplatScalarMask } from "./splat-masks.ts";
 
 export type SplatDeformerWeight = { index: number; weight: number };
-export type SplatDeformerKey = { channel: string; frame: number; value: number };
 export type SplatDeformer = {
   id: string;
   name: string;
@@ -176,6 +178,7 @@ export function validateShapeDeformers(shape: SplatShapeNode, sourceCount?: numb
           key.value < (control.min ?? -Infinity) || key.value > (control.max ?? Infinity)) throw Error("Invalid or unordered splat deformer key.");
         lastFrames.set(key.channel, key.frame);
       }
+      for (const curve of deformerCurves(entry.keys).values()) validateCurveKeys(curve);
     }
     evaluations += entry.weights?.length ?? count;
   }
@@ -208,28 +211,36 @@ export function withSplatDeformerControl(entry: SplatDeformer, channel: string, 
 }
 
 export function keySplatDeformer(entry: SplatDeformer, channel: string, frame: number, value: number): SplatDeformer {
-  const keys = [...(entry.keys ?? []).filter(key => key.channel !== channel || key.frame !== frame), { channel, frame, value }];
+  return keySplatDeformerControls(entry, frame, [{ id: channel, value }]);
+}
+
+export function keySplatDeformerControls(entry: SplatDeformer, frame: number, controls: readonly { id: string; value: number }[]): SplatDeformer {
+  const values = new Map(controls.map(c => [c.id, c.value]));
+  const keys = (entry.keys ?? []).map(key => {
+    const value = values.get(key.channel);
+    if (key.frame !== frame || value === undefined) return key;
+    values.delete(key.channel);
+    return changedDeformerKey(key, value);
+  });
+  for (const [channel, value] of values) keys.push({ channel, frame, value });
   keys.sort((a, b) => a.channel.localeCompare(b.channel) || a.frame - b.frame);
   return { ...entry, keys };
 }
 
+const samples = new WeakMap<SplatDeformer, { frame: number; sampled: SplatDeformer; fields: Map<string, SplatDeformerControl<unknown>> }>();
 export function sampleSplatDeformer(entry: SplatDeformer, frame: number): SplatDeformer {
   if (!entry.keys?.length) return entry;
-  const intervals = new Map<string, { before?: SplatDeformerKey; after?: SplatDeformerKey }>();
-  for (const key of entry.keys) {
-    const interval = intervals.get(key.channel) ?? {};
-    if (key.frame <= frame) interval.before = key;
-    else interval.after ??= key;
-    intervals.set(key.channel, interval);
-  }
+  const cache = samples.get(entry);
+  if (cache?.frame === frame) return cache.sampled;
   let sampled = entry;
-  const controls = new Map(splatDeformerControls(entry).map(control => [control.id, control]));
-  for (const [channel, { before, after }] of intervals) {
-    const value = !before ? after!.value : !after ? before.value :
-      MathUtils.lerp(before.value, after.value, (frame - before.frame) / (after.frame - before.frame));
+  const controls = cache?.fields ?? new Map(splatDeformerControls(entry).map(control => [control.id, control]));
+  for (const [channel, curve] of deformerCurves(entry.keys)) {
     const control = controls.get(channel);
-    if (control) sampled = withSplatDeformerControl(sampled, channel, value, control);
+    if (!control) continue;
+    const value = MathUtils.clamp(evaluateCurve(curve, frame)!, control.min ?? -Infinity, control.max ?? Infinity);
+    sampled = withSplatDeformerControl(sampled, channel, value, control);
   }
+  samples.set(entry, { frame, sampled, fields: controls });
   return sampled;
 }
 

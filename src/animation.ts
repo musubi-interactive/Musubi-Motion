@@ -1,3 +1,5 @@
+import { applyDeformerTracks, deformerTrackRows } from "./splat-deformer-tracks.ts";
+import { assertSplatDeformerUndoFits, trimSplatDeformerHistory } from "./splat-deformer-history.ts";
 import { isDiscreteAttribute, validDiscreteValue } from "./custom-attribute-types.ts";
 import { attributesFor, customAttribute, customChannel, isCustomChannel, boundedAttributeValue, type CustomChannel } from "./custom-attributes.ts";
 import { CubicBezierCurve, Vector2 } from "three";
@@ -11,7 +13,7 @@ export const POSE_ANIMATION_CHANNELS = [
 ] as const;
 export const ANIMATION_CHANNELS = [...POSE_ANIMATION_CHANNELS, "ik.blend"] as const;
 export type PoseAnimationChannel = typeof POSE_ANIMATION_CHANNELS[number];
-export type AnimationChannel = typeof ANIMATION_CHANNELS[number] | `morph.${number}` | CustomChannel;
+export type AnimationChannel = typeof ANIMATION_CHANNELS[number] | `morph.${number}` | CustomChannel | `deformer.${string}`;
 export type CurveKey = {
   id: string;
   time: number;
@@ -312,8 +314,16 @@ function animationIndex(animation?: AnimationData): CompiledAnimation {
 /** Base has no layerId. All editors use this view; ownership validation scans
  * the complete flat track list, including muted and locked layers. */
 export function editingTracks(doc: SceneDocument): AnimationTrack[] {
-  const animation = doc.animation;
-  return (animation?.tracks ?? []).filter(track => track.layerId === animation?.activeLayerId);
+  const animation = editorAnimation(doc);
+  return animation.tracks.filter(track => track.layerId === animation.activeLayerId);
+}
+/** Only keyed deformer channels appear in the base-layer time editors. Native
+ * pose evaluation continues to consume ordinary animation tracks exclusively. */
+function editorAnimation(doc: SceneDocument): AnimationData {
+  const animation = doc.animation ?? defaultAnimation();
+  if (animation.activeLayerId !== undefined) return animation;
+  const rows = deformerTrackRows(doc);
+  return rows.size ? { ...animation, tracks: [...animation.tracks, ...Array.from(rows.values(), row => row.track)] } : animation;
 }
 export function assertAnimationLayerEditable(doc: SceneDocument): void {
   const id = doc.animation?.activeLayerId;
@@ -478,8 +488,18 @@ function evaluateVisibility(keys: CurveKey[], frame: number): number | undefined
   return keys[low].value >= 0.5 ? 1 : 0;
 }
 
-function saveAnimation(store: SceneStore, animation: AnimationData, editLabel: string) {
-  const doc = store.getState().document;
+function saveCurveEdit(store: SceneStore, animation: AnimationData, label: string) {
+  const before = store.getState().document;
+  if (animation.activeLayerId !== undefined || (!deformerTrackRows(before).size && !animation.tracks.some(t => t.channel.startsWith("deformer.")))) {
+    saveAnimation(store, animation, label);
+    return;
+  }
+  const doc = applyDeformerTracks(before, animation.tracks.filter(track => track.channel.startsWith("deformer.")));
+  if (doc !== before) assertSplatDeformerUndoFits(before, doc);
+  saveAnimation(store, { ...animation, tracks: animation.tracks.filter(track => !track.channel.startsWith("deformer.")) }, label, doc);
+  if (doc !== before) trimSplatDeformerHistory(store);
+}
+function saveAnimation(store: SceneStore, animation: AnimationData, editLabel: string, doc = store.getState().document) {
   for (const track of animation.tracks) {
     const attribute = customAttribute(doc, track.targetId, track.channel);
     if (attribute?.locked && JSON.stringify(track) !== JSON.stringify(doc.animation?.tracks.find(item => item.id === track.id))) throw Error("Unlock the attribute before editing its curve.");
@@ -487,7 +507,10 @@ function saveAnimation(store: SceneStore, animation: AnimationData, editLabel: s
   for (const track of doc.animation?.tracks ?? []) if (customAttribute(doc, track.targetId, track.channel)?.locked && !animation.tracks.some(item => item.id === track.id)) throw Error("Unlock the attribute before deleting its curve.");
   validateAnimation(animation, doc);
   validateParticleEmitters({ ...doc, animation });
-  if (JSON.stringify(doc.animation ?? defaultAnimation()) === JSON.stringify(animation)) return;
+  if (JSON.stringify(doc.animation ?? defaultAnimation()) === JSON.stringify(animation)) {
+    if (doc !== store.getState().document) store.setState({ document: doc, editLabel });
+    return;
+  }
   store.setState({ document: { ...doc, animation }, editLabel });
 }
 export function channelsForTarget(doc: SceneDocument, id: string): AnimationChannel[] {
@@ -578,7 +601,7 @@ export function setIKBlendKey(store: SceneStore, id: string, frame: number, valu
 }
 
 export function replaceTracks(store: SceneStore, replacements: AnimationTrack[], label = "Edit animation curves") {
-  const doc = store.getState().document, animation = doc.animation ?? defaultAnimation();
+  const doc = store.getState().document, animation = editorAnimation(doc);
   assertAnimationLayerEditable(doc);
   const existing = new Map(animation.tracks.map(track => [track.id, track]));
   const normalized = replacements.map(track => {
@@ -599,7 +622,7 @@ export function replaceTracks(store: SceneStore, replacements: AnimationTrack[],
     byId.delete(track.id); return replacement ?? track;
   });
   tracks.push(...byId.values());
-  saveAnimation(store, { ...animation, tracks }, label);
+  saveCurveEdit(store, { ...animation, tracks }, label);
 }
 export function upsertTrack(store: SceneStore, track: AnimationTrack) { replaceTracks(store, [track]); }
 
@@ -607,13 +630,13 @@ export function upsertTrack(store: SceneStore, track: AnimationTrack) { replaceT
  * returned unchanged. Adjacent presets become fixed tangents to retain shape. */
 export function insertKey(store: SceneStore, trackId: string, time: number): string {
   if (!finite(time, 1e6)) throw Error("Invalid insert frame.");
-  const animation = store.getState().document.animation ?? defaultAnimation();
+  const animation = editorAnimation(store.getState().document);
   const track = animation.tracks.find(track => track.id === trackId);
   if (!track) throw Error("Select an existing animation curve.");
   assertActiveTracks(store.getState().document, [track]);
   const { keys, id } = insertCurveKey(track.keys, time, { discrete: track.channel === "visibility" });
   if (track.keys.some(key => key.id === id)) return id;
-  saveAnimation(store, { ...animation, tracks: animation.tracks.map(candidate => candidate.id === trackId ? { ...track, keys } : candidate) }, "Insert keyframe");
+  saveCurveEdit(store, { ...animation, tracks: animation.tracks.map(candidate => candidate.id === trackId ? { ...track, keys } : candidate) }, "Insert keyframe");
   return id;
 }
 
@@ -682,35 +705,35 @@ export function insertCurveKey(source: readonly CurveKey[], time: number, option
 }
 
 export function deleteKeys(store: SceneStore, keyIds: Iterable<string>) {
-  const animation = store.getState().document.animation ?? defaultAnimation(), selected = new Set(keyIds);
+  const animation = editorAnimation(store.getState().document), selected = new Set(keyIds);
   assertActiveTracks(store.getState().document, animation.tracks.filter(track => track.keys.some(key => selected.has(key.id))));
-  saveAnimation(store, { ...animation, tracks: animation.tracks.map(track => track.layerId === animation.activeLayerId
+  saveCurveEdit(store, { ...animation, tracks: animation.tracks.map(track => track.layerId === animation.activeLayerId
     ? { ...track, keys: track.keys.filter(key => !selected.has(key.id)) } : track).filter(track => track.layerId !== animation.activeLayerId || track.keys.length) }, "Delete keyframes");
 }
 export function patchKeys(store: SceneStore, keyIds: Iterable<string>, patch: Partial<Omit<CurveKey, "id">>) {
-  const animation = store.getState().document.animation ?? defaultAnimation(), selected = new Set(keyIds);
+  const animation = editorAnimation(store.getState().document), selected = new Set(keyIds);
   assertActiveTracks(store.getState().document, animation.tracks.filter(track => track.keys.some(key => selected.has(key.id))));
   const tracks = animation.tracks.map(track => ({ ...track, keys: track.keys.map(key => selected.has(key.id) ? { ...key, ...patch, id: key.id } : key).sort((a, b) => a.time - b.time) }));
-  saveAnimation(store, { ...animation, tracks }, "Edit keyframes");
+  saveCurveEdit(store, { ...animation, tracks }, "Edit keyframes");
 }
 export function moveKeys(store: SceneStore, keyIds: Iterable<string>, timeDelta: number, valueDelta = 0) {
   if (!finite(timeDelta, 2e6) || !finite(valueDelta)) throw Error("Invalid keyframe movement.");
-  const animation = store.getState().document.animation ?? defaultAnimation(), selected = new Set(keyIds);
+  const animation = editorAnimation(store.getState().document), selected = new Set(keyIds);
   assertActiveTracks(store.getState().document, animation.tracks.filter(track => track.keys.some(key => selected.has(key.id))));
   const tracks = animation.tracks.map(track => ({ ...track, keys: track.keys.map(key => selected.has(key.id)
     ? { ...key, time: key.time + timeDelta, value: key.value + valueDelta } : key).sort((a, b) => a.time - b.time) }));
-  saveAnimation(store, { ...animation, tracks }, "Move keyframes");
+  saveCurveEdit(store, { ...animation, tracks }, "Move keyframes");
 }
 /** Scale selected keys around a frame, snapping results to whole frames. */
 export function scaleKeys(store: SceneStore, keyIds: Iterable<string>, factor: number, pivot?: number) {
   if (!finite(factor) || factor <= 0 || (pivot !== undefined && !finite(pivot, 1e6))) throw Error("Keyframe scale must be positive and finite.");
-  const animation = store.getState().document.animation ?? defaultAnimation(), selected = new Set(keyIds);
+  const animation = editorAnimation(store.getState().document), selected = new Set(keyIds);
   assertActiveTracks(store.getState().document, animation.tracks.filter(track => track.keys.some(key => selected.has(key.id))));
   let origin = pivot ?? Infinity;
   if (pivot === undefined) for (const track of animation.tracks) for (const key of track.keys) if (selected.has(key.id)) origin = Math.min(origin, key.time);
   if (!Number.isFinite(origin)) return;
   const tracks = animation.tracks.map(track => ({ ...track, keys: scaleCurveKeys(track.keys, selected, factor, origin, true) }));
-  saveAnimation(store, { ...animation, tracks }, "Scale keyframes");
+  saveCurveEdit(store, { ...animation, tracks }, "Scale keyframes");
 }
 
 /** Scale curve coordinates; only adjoining selected endpoints share a duration
@@ -755,17 +778,18 @@ export function copyKeys(doc: SceneDocument, keyIds: Iterable<string>): KeyClipb
 export function pasteKeys(store: SceneStore, clipboard: KeyClipboard, frame: number, targetId?: string): string[] {
   if (!finite(frame, 1e6) || !finite(clipboard.origin, 1e6)) throw Error("Invalid paste frame.");
   assertAnimationLayerEditable(store.getState().document);
-  const animation = store.getState().document.animation ?? defaultAnimation(), tracks = [...animation.tracks], ids: string[] = [];
+  const animation = editorAnimation(store.getState().document), tracks = [...animation.tracks], ids: string[] = [];
   for (const source of clipboard.tracks) {
     const destination = targetId ?? source.targetId;
     const index = tracks.findIndex(track => track.targetId === destination && track.channel === source.channel && track.layerId === animation.activeLayerId);
-    const track = index < 0 ? { id: crypto.randomUUID(), targetId: destination, channel: source.channel, keys: [], ...activeLayerFields(store.getState().document) } : tracks[index];
+    if (source.channel.startsWith("deformer.") && animation.activeLayerId !== undefined) throw Error("Select base animation to paste deformer keys.");
+    const track = index < 0 ? { id: source.channel.startsWith("deformer.") ? source.id : crypto.randomUUID(), targetId: destination, channel: source.channel, keys: [], ...activeLayerFields(store.getState().document) } : tracks[index];
     const pasted = source.keys.map(key => ({ ...key, id: crypto.randomUUID(), time: frame + key.time - clipboard.origin }));
     ids.push(...pasted.map(key => key.id));
     const times = new Set(pasted.map(key => key.time));
     const next = { ...track, keys: [...track.keys.filter(key => !times.has(key.time)), ...pasted].sort((a, b) => a.time - b.time) };
     if (index < 0) tracks.push(next); else tracks[index] = next;
   }
-  saveAnimation(store, { ...animation, tracks }, "Paste keyframes");
+  saveCurveEdit(store, { ...animation, tracks }, "Paste keyframes");
   return ids;
 }
