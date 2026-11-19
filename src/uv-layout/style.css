@@ -110,3 +110,21 @@ button:disabled { opacity: .55; }
 @media (max-width: 680px) {
   main { grid-template-columns: minmax(0, 1fr); padding: 10px; }
 }
+
+#uv-analysis :is(input, select) { min-width: 0; max-width: 62%; }
+#uv-analysis input[type="number"] { width: 112px; text-align: right; font-variant-numeric: tabular-nums; }
+#uv-analysis input[type="text"] {
+  width: 100%;
+  max-width: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--control);
+  min-height: 29px;
+  padding: 4px 8px;
+}
+.analysis-tiles { display: grid; gap: 4px; }
+.analysis-actions { flex-wrap: wrap; margin-top: 8px; }
+#uv-analysis-results { margin-top: 12px; }
+#uv-analysis-results p { margin: 0 0 8px; }
+#analysis-island-pages { margin: 0 0 8px; }
+#analysis-island-pages[hidden] { display: none; }
