@@ -6,12 +6,14 @@ import { defaultParticleEmissionMap, type ParticleEmissionMap } from "./particle
 import { defaultParticleGraphAppearance, defaultParticleGraphField, MAX_PARTICLE_FIELD_STRENGTH,
   type ParticleGraphAppearance, type ParticleGraphField } from "./particle-map-fields.ts";
 import { propertyInteraction } from "./property-interaction.ts";
+import { defaultAnimation } from "./animation.ts";
+import type { createParticleRuntime } from "./particle-runtime.ts";
 
 type Options = {
   available: () => boolean;
   getSelection: () => string[];
   onSelectObject: (id: string) => void;
-  getRuntimeStatus?: (shapeId: string) => { count: number; pending: boolean; error?: string } | undefined;
+  getRuntimeStatus?: (shapeId: string) => ReturnType<typeof createParticleRuntime>["status"] | undefined;
   onPreviewChange?: () => void;
 };
 const emissionNames: Record<ParticleEmission, string> = { omni: "Omni", directional: "Directional", box: "Box volume", sphere: "Sphere volume", surface: "Mesh surface" };
@@ -38,12 +40,25 @@ export function createParticlePanel(store: SceneStore, options: Options) {
   creation.append(label("Type", preset), label("Name", newName), placement, create);
   const emitters = select("Selected particle emitter"), empty = note("Create an emitter or select one in the Outliner. Use Properties and the object gizmo to animate its transform.");
   const fields = document.createElement("div"), summary = note(""), runtime = note(""); runtime.setAttribute("aria-label", "Particle runtime status");
+  const cacheControls = group("Replay Cache"), cacheRange = document.createElement("div"); cacheRange.className = "particle-pair";
+  const cacheStart = document.createElement("input"), cacheEnd = document.createElement("input");
+  for (const input of [cacheStart, cacheEnd]) { input.type = "number"; input.step = "1"; }
+  cacheRange.append(label("Start frame", cacheStart), label("End frame", cacheEnd));
+  const prewarm = document.createElement("button"); prewarm.type = "button";
+  const cacheStatus = note(""); cacheStatus.setAttribute("role", "status"); cacheStatus.setAttribute("aria-label", "Particle prewarm status");
+  cacheControls.append(cacheRange, prewarm, cacheStatus);
   const emission = group("Emission"), enabled = document.createElement("input"); enabled.type = "checkbox";
   const enabledLabel = label("Enabled", enabled); enabledLabel.className = "particle-check"; emission.append(enabledLabel);
   const dynamics = group("Dynamics"), appearance = group("Appearance");
   const status = note(""); status.className = "particle-status"; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
   let activeId = "", selectionSignature = "", emitterSignature = "", displayedId = "";
   let draft: { base: SceneDocument; next: SceneDocument } | undefined;
+  let rangeSignature = "";
+  let warming: { id: string; doc: SceneDocument; cancel: () => void } | undefined;
+  function cancelPrewarm() {
+    const job = warming; warming = undefined;
+    job?.cancel();
+  }
   function evaluationDocument() { const doc = store.getState().document; return draft?.base === doc ? draft.next : doc; }
   function clearDraft() { draft = undefined; options.onPreviewChange?.(); }
   const bindings: { input: HTMLInputElement; read: (shape: ParticleShapeNode) => string }[] = [];
@@ -203,7 +218,7 @@ export function createParticlePanel(store: SceneStore, options: Options) {
     (shape, strength) => fieldPatch(shape, { strength }), -MAX_PARTICLE_FIELD_STRENGTH, MAX_PARTICLE_FIELD_STRENGTH, "0.1");
   textureField.append(note("Connect Vector 3 to Texture Graph Output Field. Strength is acceleration in world units per second squared. Time samples each historical step. Use Multiply to vary the field over time."));
   dynamics.append(textureField);
-  fields.append(summary, runtime, emission, dynamics, appearance);
+  fields.append(summary, runtime, cacheControls, emission, dynamics, appearance);
   const help = note("Emitter properties are static saved settings. Animate the emitter's transform with Properties and the timeline. Particles already born stay in world space. Changes replay the seeded simulation; pending results appear in the runtime status.");
   element.append(style, creation, label("Emitter", emitters), empty, fields, status, help);
 
@@ -218,7 +233,24 @@ export function createParticlePanel(store: SceneStore, options: Options) {
   preset.onchange = () => refresh();
   enabled.onchange = () => run(() => patch({ enabled: enabled.checked }));
   emitters.onchange = () => run(() => { activeId = emitters.value; status.textContent = ""; if (activeId) options.onSelectObject(current().parentId); });
-  function resetScene() { draft = undefined; activeId = ""; displayedId = ""; selectionSignature = JSON.stringify(options.getSelection()); status.textContent = ""; status.dataset.error = "false"; refresh(); }
+  prewarm.onclick = () => {
+    if (warming) { cancelPrewarm(); return; }
+    run(() => {
+      const cache = options.getRuntimeStatus?.(current().id)?.replayCache;
+      if (!cache) throw Error("Particle replay cache is unavailable.");
+      warming = { id: activeId, doc: store.getState().document, cancel: cache.cancel };
+      cache.start({ start: cacheStart.valueAsNumber, end: cacheEnd.valueAsNumber }, refresh);
+    });
+  };
+  cacheControls.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || !warming) return;
+    event.preventDefault(); event.stopPropagation(); cancelPrewarm();
+  });
+  function resetScene() {
+    cancelPrewarm();
+    draft = undefined; activeId = ""; displayedId = ""; rangeSignature = "";
+    selectionSignature = JSON.stringify(options.getSelection()); status.textContent = ""; status.dataset.error = "false"; refresh();
+  }
   function refresh() {
     const doc = store.getState().document, selection = options.getSelection(), available = options.available();
     const selectionKey = JSON.stringify(selection);
@@ -227,6 +259,7 @@ export function createParticlePanel(store: SceneStore, options: Options) {
     const listKey = JSON.stringify(shapes.map(shape => [shape.id, doc.nodes[shape.parentId]?.name ?? shape.name]));
     if (listKey !== emitterSignature) { emitterSignature = listKey; emitters.replaceChildren(new Option("Choose a particle emitter", ""), ...shapes.map(shape => new Option(doc.nodes[shape.parentId]?.name ?? shape.name, shape.id))); }
     const shape = shapes.find(item => item.id === activeId); if (!shape) activeId = "";
+    if (warming && (warming.id !== activeId || warming.doc !== doc || !available)) cancelPrewarm();
     const switched = displayedId !== activeId; displayedId = activeId;
     emitters.value = activeId; fields.hidden = !shape; empty.hidden = !!shape;
     for (const input of Array.from(element.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input,select,button"))) input.disabled = !available;
@@ -259,6 +292,25 @@ export function createParticlePanel(store: SceneStore, options: Options) {
     const state = options.getRuntimeStatus?.(shape.id);
     runtime.textContent = state?.error ? state.error : state ? `${state.count.toLocaleString()} particles${state.pending ? " · Replaying simulation…" : ""}` : "";
     runtime.dataset.error = String(!!state?.error);
+    const { start, end } = doc.animation ?? defaultAnimation();
+    const rangeKey = `${shape.id}:${start}:${end}`;
+    if (rangeKey !== rangeSignature) {
+      rangeSignature = rangeKey;
+      for (const input of [cacheStart, cacheEnd]) { input.min = String(start); input.max = String(end); }
+      cacheStart.value = String(start); cacheEnd.value = String(end);
+    }
+    const cache = state?.replayCache.state;
+    const running = cache?.kind === "running";
+    if (!running) warming = undefined;
+    prewarm.textContent = running ? "Cancel prewarm" : "Prewarm particle replay";
+    prewarm.disabled = !available || !state || (!running && state.pending);
+    cacheStart.disabled = cacheEnd.disabled = !available || running;
+    const message = cache?.kind === "running" ? `Prewarming… ${cache.percent}%`
+      : cache?.kind === "complete" ? `Frames ${cache.range.start}–${cache.range.end} · ${cache.count} checkpoint${cache.count === 1 ? "" : "s"} ready.`
+        : cache?.kind === "cancelled" ? "Prewarm canceled."
+          : cache?.kind === "error" ? cache.message : "";
+    if (cacheStatus.textContent !== message) cacheStatus.textContent = message;
+    cacheStatus.dataset.error = String(cache?.kind === "error");
   }
   store.subscribe(() => refresh()); refresh();
   return { element, refresh, resetScene, evaluationDocument };

@@ -109,6 +109,40 @@ a world-space stream of particles. Scrubbing far forward can require substantial
 replay work; pending status is not a completed simulation result. Refreshing the
 panel reads status only and does not restart the simulation.
 
+### Prewarm a replay range
+
+Select an emitter in **FX → Particle Emitters** and enter inclusive whole
+**Start frame** and **End frame** values under **Replay Cache**. Both frames
+must be in the current playback range. Choose **Prewarm particle replay** and
+watch the progress below the button. Use **Cancel prewarm**, or press
+**Escape** while focus is in **Replay Cache**. The two fields and the button
+are reachable by **Tab**, and **Enter** or **Space** activates the button.
+Seeking, changing the scene or selection, and closing the emitter or scene
+also cancel in-progress work. The playhead and visible cloud stay in place
+during prewarm, and the operation makes no undo entry.
+
+The action follows Maya's selected-object cache workflow and inclusive start and
+end frames. [Create an nParticle nCache](https://help.autodesk.com/cloudhelp/2022/ENU/Maya-SimulationEffects/files/GUID-7FB6513C-28FF-4B68-A77C-8AF86B51F0DC.htm),
+[nCache Start/End options](https://help.autodesk.com/cloudhelp/2025/ENU/Maya-SimulationEffects/files/GUID-C24C3A7E-B63A-4061-9E3D-59D89297C19A.htm).
+
+Musubi stores checkpoints at the first and last simulated steps in the range
+and at the regular one-second boundaries within it. A seek replays the last
+few fixed steps from the nearest usable checkpoint. The simulation starts
+from the newest available checkpoint at or before the range start, or from
+the emitter's authored starting state. The cache belongs to the current
+document revision and stays in memory.
+
+Each request permits at most 1,800 fixed steps (15 simulation seconds),
+including replay before the requested start, and up to 30 million estimated
+live-particle steps. A job can stage at most 16 MiB of checkpoint buffers
+while also referencing its starting checkpoint. The cooperative 20-second
+wall-clock limit is checked between batches. An individual synchronous step
+or browser image decode can delay cancellation until control returns.
+Completed checkpoints enter the same shared 32 MiB, 128-entry FIFO as
+ordinary replay checkpoints. Canceling or timing out discards the staged
+checkpoints. For a long replay, cache consecutive sections while checkpoints
+from earlier sections are still available.
+
 `.msb` scenes save emitter settings, source references, transform animation, and
 the seed. They do not save a baked particle cache or the currently live particle
 buffers. Opening a scene regenerates its effect through the same evaluation path.
@@ -124,7 +158,7 @@ Particles render as soft circular shader points. Their maximum screen size is
 limited by the device's point-size range. Opaque meshes occlude them, but sorting
 between transparent objects, individual particles, and Gaussian splats is
 approximate. Select an emitter using its octahedral viewport marker or Outliner;
-framing includes its current cloud. Pending backward replay clears future output.
+framing includes its current cloud. Pending replay keeps the last completed cloud visible.
 
 Validation rejects an entire edit if it exceeds a limit or makes the emitter
 invalid. Current bounds include:
