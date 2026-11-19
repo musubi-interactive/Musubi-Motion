@@ -38,6 +38,16 @@ describe("weighted cluster stack", () => {
     expect(withSplatDeformerWeights(stack[0], [0, 1], .25).weights).toEqual([{ index: 0, weight: .25 }, { index: 1, weight: .25 }, { index: 2, weight: 1 }]);
   });
 
+  it("retains authored turns when translating a rotated cluster handle", () => {
+    const node = rotated(entry(), 450);
+    const handle = cluster.handle!;
+    const pose = handle.get(node.params, 0);
+    pose.position.set(2, 3, 1);
+    const updated = handle.set(node.params, 0, pose);
+    expect(updated.rotation).toEqual([0, 0, 450]);
+    expect(updated.position).toEqual([2, 3, 1]);
+  });
+
   it("uses ordered transforms after component edits, retaining intact affine covariance", () => {
     const rest = { version: 1 as const, sourceCount: 3, records: [{ index: 0, matrix: new Matrix4().makeTranslation(1, 0, 0).toArray() }] };
     const shift = translated(entry("shift"), 3), turn = rotated(entry("turn"), 90);

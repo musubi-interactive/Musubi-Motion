@@ -2163,8 +2163,14 @@ async function start() {
     },
     onPreview() { updateBindings(); refreshGizmo(); },
     onHandleChange() { refreshGizmo(); },
+    onContextChange: refreshCageBinding,
   });
   workspace.registerPanel("splat-deformers", "Splat Deformers", deformerPanel.element);
+  refreshCageBinding();
+  new ResizeObserver(() => {
+    if (!deformerPanel?.element.checkVisibility()) deformerPanel?.stopEditing();
+    refreshGizmo();
+  }).observe(deformerPanel.element);
   element("create-splat-cluster").addEventListener("click", () => {
     element("view-splat-deformers").click();
     deformerPanel?.create("cluster");

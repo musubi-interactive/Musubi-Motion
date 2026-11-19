@@ -1,3 +1,5 @@
+import { NONLINEAR_SPLAT_DEFORMERS } from "./splat-nonlinear.ts";
+import { CAGE_SPLAT_DEFORMERS } from "./splat-cage-deformers.ts";
 import { Box3, Euler, MathUtils, Matrix3, Matrix4, Quaternion, Vector3 } from "three";
 import type { SceneDocument, SplatShapeNode, Vec3 } from "./scene-document.ts";
 import { componentTransformLookup, type SplatComponentTransforms } from "./splat-component-transforms.ts";
@@ -42,6 +44,7 @@ export type SplatDeformerDefinition<P> = {
     set(params: P, index: number, transform: SplatDeformerHandleTransform): P;
     count(params: P): number;
     name?(index: number): string;
+    localAxis?(index: number): "x" | "y" | "z" | undefined;
     modes?: readonly HandleMode[] | ((index: number) => readonly HandleMode[]);
   };
 };
@@ -100,9 +103,10 @@ const clusterDefinition: SplatDeformerDefinition<ClusterParams> = {
         rotation: clusterQuaternion(params.rotation), scale: new Vector3().fromArray(params.scale) };
     },
     set(params, _index, transform) {
+      const sameOrientation = Math.abs(clusterQuaternion(params.rotation).dot(transform.rotation)) >= 1 - 1e-12;
       const angles = new Euler().setFromQuaternion(transform.rotation);
       return { ...params, position: transform.position.clone().sub(new Vector3().fromArray(params.pivot)).toArray(),
-        rotation: [angles.x, angles.y, angles.z].map(MathUtils.radToDeg) as Vec3, scale: transform.scale.toArray() };
+        rotation: sameOrientation ? params.rotation : [angles.x, angles.y, angles.z].map(MathUtils.radToDeg) as Vec3, scale: transform.scale.toArray() };
     },
   },
 };
@@ -114,7 +118,9 @@ function clusterQuaternion(rotation: Vec3) {
 // Concrete parameter types remain inside each definition. Archive validation
 // runs before evaluation passes a payload to its corresponding definition.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const SPLAT_DEFORMER_DEFINITIONS: readonly SplatDeformerDefinition<any>[] = [clusterDefinition];
+export const SPLAT_DEFORMER_DEFINITIONS: readonly SplatDeformerDefinition<any>[] = [
+  clusterDefinition, ...NONLINEAR_SPLAT_DEFORMERS, ...CAGE_SPLAT_DEFORMERS,
+];
 export function getSplatDeformerDefinition(kind: string) {
   return SPLAT_DEFORMER_DEFINITIONS.find(definition => definition.kind === kind);
 }
@@ -125,13 +131,18 @@ export const SPLAT_DEFORMER_LIMITS = {
 };
 const unit = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 
-export function validateShapeDeformers(shape: Pick<SplatShapeNode, "deformers" | "scalarMasks" | "assetId">, sourceCount?: number) {
+export function validateShapeDeformers(shape: SplatShapeNode, sourceCount?: number) {
   const entries = shape.deformers;
   if (entries === undefined) return 0;
   if (!Array.isArray(entries) || entries.length < 1 || entries.length > SPLAT_DEFORMER_LIMITS.perShape)
     throw Error("A splat deformation stack supports 1–8 deformers per shape.");
   const ids = new Set<string>();
   const count = sourceCount ?? entries[0]?.sourceCount;
+  const authoredCounts = [shape.componentEdits?.sourceCount, shape.componentTransforms?.sourceCount,
+    shape.binding?.weights?.count, shape.scalarMasks?.[0]?.sourceCount, shape.selectionSets?.[0]?.sourceCount,
+    shape.appearance?.sourceCount, shape.attributePaint?.sourceCount];
+  if (authoredCounts.some(value => value !== undefined && value !== count))
+    throw Error("Splat deformers must match the source count of other edits on this shape.");
   let evaluations = 0;
   for (const entry of entries as readonly SplatDeformer[]) {
     const definition = entry && getSplatDeformerDefinition(entry.kind);
@@ -256,8 +267,18 @@ export function evaluateSplatDeformers(
   const sourceCount = stack[0].sourceCount, componentAt = componentTransformLookup(component);
   const source = new Vector3(), input = new Vector3(), output = new Vector3(), linear = new Matrix3(), jacobian = new Matrix3(), matrix = new Matrix4();
   const records: SplatComponentTransforms["records"][number][] = [];
+  // Whole-object layers need every original. Sparse layers can visit just their
+  // union and any component records that must survive the stack unchanged.
+  const visits = layers.reduce((sum, layer) => sum + (layer.weights?.size ?? sourceCount), component?.records.length ?? 0);
+  let indices: number[] | undefined;
+  if (visits < sourceCount / 2) {
+    const members = new Set(component?.records.map(record => record.index));
+    for (const layer of layers) for (const index of layer.weights!.keys()) members.add(index);
+    indices = [...members].sort((a, b) => a - b);
+  }
   let changed = false;
-  for (let index = 0; index < sourceCount; index++) {
+  for (let offset = 0; offset < (indices?.length ?? sourceCount); offset++) {
+    const index = indices?.[offset] ?? offset;
     const prior = componentAt(index);
     let initialized = false, affected = false, sourceScale = 0;
     for (const layer of layers) {
