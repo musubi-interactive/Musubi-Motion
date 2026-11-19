@@ -19,18 +19,22 @@ function* selectedEdges(layout: UVLayout, selected: ReadonlySet<number>, borders
 
 export function firstMappedTile(layout: UVLayout, selected: ReadonlySet<number>, bordersOnly: boolean): Tile | undefined {
   for (const edge of selectedEdges(layout, selected, bordersOnly)) {
-    const start = layout.coordinates[edge.start], end = layout.coordinates[edge.end];
-    if (start[0] === end[0] && start[1] === end[1]) continue;
-    const midpoint: UVPoint = [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2];
-    // The midpoint can round to an endpoint exactly on a tile boundary.
-    for (const [u, v] of [midpoint, start, end]) {
-      const tile = { u: Math.floor(u), v: Math.floor(v) };
-      if (clipSegment(start, end, tile)) return tile;
-    }
+    const tile = firstEdgeTile(layout.coordinates[edge.start], layout.coordinates[edge.end]);
+    if (tile) return tile;
   }
 }
 
-function clipSegment(start: UVPoint, end: UVPoint, { u, v }: Tile): Segment | undefined {
+export function firstEdgeTile(start: UVPoint, end: UVPoint): Tile | undefined {
+  if (start[0] === end[0] && start[1] === end[1]) return;
+  const midpoint: UVPoint = [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2];
+  // The midpoint can round to an endpoint exactly on a tile boundary.
+  for (const [u, v] of [midpoint, start, end]) {
+    const tile = { u: Math.floor(u), v: Math.floor(v) };
+    if (clipSegment(start, end, tile)) return tile;
+  }
+}
+
+export function clipSegment(start: UVPoint, end: UVPoint, { u, v }: Tile): Segment | undefined {
   const x = start[0] - u, y = start[1] - v;
   const dx = end[0] - start[0], dy = end[1] - start[1];
   let enter = 0, exit = 1;

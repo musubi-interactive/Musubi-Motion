@@ -1,0 +1,56 @@
+:root {
+  color-scheme: light dark;
+  color: #202020;
+  background: #ececec;
+  font: 14px/1.45 "Inter", system-ui, sans-serif;
+  --panel: #fafafa;
+  --stroke: #d0d0d0;
+  --input-stroke: #858585;
+  --muted: #525252;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #ececec;
+    background: #202020;
+    --panel: #282828;
+    --stroke: #494949;
+    --input-stroke: #929292;
+    --muted: #bcbcbc;
+  }
+}
+body { max-width: 620px; margin: 28px auto; padding: 0 16px; }
+a { color: inherit; text-underline-offset: 3px; }
+h1 { margin: 12px 0 16px; font-size: 24px; }
+h2 { margin: 0 0 10px; font-size: 15px; }
+p { margin: 8px 0 0; color: var(--muted); overflow-wrap: anywhere; }
+p:empty { margin: 0; }
+section { padding: 14px; margin-bottom: 10px; background: var(--panel); border: 1px solid var(--stroke); border-radius: 5px; }
+button, select, input { font: inherit; }
+button, select, input[type="number"] {
+  min-height: 28px;
+  box-sizing: border-box;
+  padding: 3px 8px;
+  border: 1px solid var(--input-stroke);
+  border-radius: 3px;
+  background: var(--panel);
+  color: inherit;
+}
+button:not(:disabled) { cursor: pointer; }
+button:not(:disabled):hover { background: color-mix(in srgb, currentColor 9%, var(--panel)); }
+button:disabled, select:disabled, input:disabled { opacity: .65; }
+:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+input { accent-color: light-dark(#343434, #bdbdbd); }
+.bar, .buttons, .fields { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.bar { justify-content: space-between; }
+.bar h2 { margin: 0; }
+ul { list-style: none; padding: 0; margin: 8px 0 0; max-height: 266px; overflow: auto; border: 1px solid var(--stroke); border-radius: 3px; }
+li { padding: 6px 8px; overflow-wrap: anywhere; }
+li + li { border-top: 1px solid var(--stroke); }
+li label { display: flex; align-items: baseline; gap: 7px; }
+li input { margin: 3px 1px 0; }
+.mesh-detail { display: block; margin-inline-start: 23px; color: var(--muted); font-size: 13px; }
+fieldset { min-inline-size: 0; margin: 0; padding: 0; border: 0; }
+.fields { column-gap: 12px; align-items: end; }
+.fields label { display: grid; gap: 4px; }
+#frame { width: 95px; text-align: end; }
+#download { margin-top: 12px; font-weight: 600; }

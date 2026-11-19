@@ -52,6 +52,40 @@
             </select>
           </label>
         </section>
+        <section id="uv-analysis" hidden>
+          <h2>UV Diagnostics</h2>
+          <label class="option">Texture size (px)
+            <input id="analysis-resolution" type="number" min="1" max="16384" step="1" value="1024" required />
+          </label>
+          <label class="option" title="Length of one OBJ coordinate unit in your measurement units">
+            Unit scale
+            <input id="analysis-unit-scale" type="number" min="0.000001" max="1000000" step="any" value="1" required />
+          </label>
+          <label class="analysis-tiles">Overlap tiles (U, V)
+            <input id="analysis-tiles" type="text" maxlength="168" placeholder="Current preview tile" aria-describedby="analysis-tile-help" />
+          </label>
+          <p id="analysis-tile-help">Separate up to eight tile pairs with semicolons. Density uses whole objects and islands.</p>
+          <div class="button-group analysis-actions">
+            <button type="button" id="analyze-uv">Analyze UVs</button>
+            <button type="button" id="cancel-uv-analysis" disabled>Cancel</button>
+            <button type="button" id="undo-uv-settings" disabled>Undo setting</button>
+          </div>
+          <p id="uv-analysis-status" role="status">Choose objects and analyze their UVs.</p>
+          <div id="uv-analysis-results" hidden>
+            <label class="option">Object <select id="analysis-object"></select></label>
+            <p id="analysis-object-summary"></p>
+            <p id="analysis-object-issues"></p>
+            <label class="option">Island <select id="analysis-island"></select></label>
+            <div class="button-group analysis-actions" id="analysis-island-pages" hidden>
+              <button id="previous-islands" type="button">Previous</button>
+              <span id="analysis-island-range"></span>
+              <button id="next-islands" type="button">Next</button>
+            </div>
+            <label class="option">Density outlier <select id="analysis-outlier"></select></label>
+            <label class="option">Overlap pair <select id="analysis-pair"></select></label>
+            <button type="button" id="download-uv-report">Download JSON report</button>
+          </div>
+        </section>
         <section>
           <h2>UV Snapshot</h2>
           <label class="option">Resolution

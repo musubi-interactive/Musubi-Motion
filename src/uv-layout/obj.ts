@@ -9,6 +9,8 @@ const MAX_COORDINATE = 1_000_000;
 const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
 
 export type UVPoint = [number, number];
+export type Position = [number, number, number];
+export type MappedFace = { line: number; island: number; vertices: number[]; uvs: number[] };
 export type UVEdge = { start: number; end: number; uses: number };
 export type UVObject = {
   name: string;
@@ -18,8 +20,9 @@ export type UVObject = {
   outside: number;
   islands: number;
   edges: UVEdge[];
+  mappedFaces: MappedFace[];
 };
-export type UVLayout = { coordinates: UVPoint[]; objects: UVObject[] };
+export type UVLayout = { positions: Position[]; coordinates: UVPoint[]; objects: UVObject[] };
 
 type Corner = { vertex: number; uv?: number; normal?: number };
 type Face = { line: number; corners: Corner[] };
@@ -86,7 +89,8 @@ function* lines(source: string): Generator<{ line: number; content: string }> {
  * original polygon corners, which the renderer-oriented OBJLoader triangulates. */
 export function parseObjUVLayout(source: string): UVLayout {
   if (source.length > MAX_OBJ_BYTES) throw Error("OBJ files may be at most 32 MiB.");
-  let vertices = 0, normals = 0, faceCount = 0, cornerCount = 0;
+  let normals = 0, faceCount = 0, cornerCount = 0;
+  const positions: Position[] = [];
   const coordinates: UVPoint[] = [];
   const objects: ObjectFaces[] = [];
   let active: ObjectFaces = { name: "Default object", faces: [] };
@@ -102,10 +106,11 @@ export function parseObjUVLayout(source: string): UVLayout {
     if (!["v", "vt", "vn", "f"].includes(keyword)) continue;
     const parts = args ? args.split(/\s+/) : [];
     if (keyword === "v") {
-      if (parts.length < 3 || parts.length > 8 || ++vertices > MAX_POINTS) {
+      if (parts.length < 3 || parts.length > 8 || positions.length >= MAX_POINTS) {
         invalid(line, "Expected a position with 3–8 values within the 200,000 position limit.");
       }
-      for (const part of parts) coordinate(part, line);
+      const [x, y, z] = parts.map(part => coordinate(part, line));
+      positions.push([x, y, z]);
     } else if (keyword === "vt") {
       if (parts.length < 1 || parts.length > 3 || coordinates.length >= MAX_POINTS) {
         invalid(line, "Expected a texture coordinate with 1–3 values within the 200,000 UV limit.");
@@ -127,21 +132,21 @@ export function parseObjUVLayout(source: string): UVLayout {
         if (objects.length >= MAX_OBJECTS) invalid(line, "OBJ files support up to 1,000 polygon objects.");
         objects.push(active);
       }
-      active.faces.push({ line, corners: parts.map(part => faceCorner(part, vertices, coordinates.length, normals, line)) });
+      active.faces.push({ line, corners: parts.map(part => faceCorner(part, positions.length, coordinates.length, normals, line)) });
     }
   }
   if (!faceCount) throw Error("This OBJ contains no polygon faces.");
   for (const object of objects) {
     for (const face of object.faces) {
       for (const corner of face.corners) {
-        if (corner.vertex >= vertices || (corner.uv !== undefined && corner.uv >= coordinates.length)
+        if (corner.vertex >= positions.length || (corner.uv !== undefined && corner.uv >= coordinates.length)
           || (corner.normal !== undefined && corner.normal >= normals)) {
           invalid(face.line, "Face index references a missing position, UV or normal.");
         }
       }
     }
   }
-  return { coordinates, objects: objects.map(object => analyze(object, coordinates)) };
+  return { positions, coordinates, objects: objects.map(object => analyze(object, coordinates)) };
 }
 
 function areaIsZero(indices: number[], coordinates: UVPoint[]): boolean {
@@ -167,13 +172,15 @@ function rootOf(parents: Uint32Array, index: number): number {
 function analyze(object: ObjectFaces, coordinates: UVPoint[]): UVObject {
   const parents = Uint32Array.from(object.faces, (_face, index) => index);
   const edges = new Map<string, { edge: UVEdge; firstFace: number; lastFace: number }>();
+  const mapped: { index: number; line: number; vertices: number[]; uvs: number[] }[] = [];
   let islands = 0, missing = 0, degenerate = 0, outside = 0;
-  object.faces.forEach(({ corners }, faceIndex) => {
+  object.faces.forEach(({ corners, line }, faceIndex) => {
     const indices = corners.map(corner => corner.uv);
     if (!indices.every(uv => uv !== undefined)) {
       missing++;
       return;
     }
+    mapped.push({ index: faceIndex, line, vertices: corners.map(corner => corner.vertex), uvs: indices });
     islands++;
     if (areaIsZero(indices, coordinates)) degenerate++;
     if (indices.some(index => coordinates[index].some(value => value < 0 || value > 1))) outside++;
@@ -197,6 +204,12 @@ function analyze(object: ObjectFaces, coordinates: UVPoint[]): UVObject {
       }
     });
   });
+  const islandIds = new Map<number, number>();
+  const mappedFaces = mapped.map(({ index, ...face }) => {
+    const root = rootOf(parents, index);
+    if (!islandIds.has(root)) islandIds.set(root, islandIds.size + 1);
+    return { ...face, island: islandIds.get(root)! };
+  });
   return {
     name: object.name,
     faces: object.faces.length,
@@ -205,5 +218,6 @@ function analyze(object: ObjectFaces, coordinates: UVPoint[]): UVObject {
     outside,
     islands,
     edges: [...edges.values()].map(record => record.edge),
+    mappedFaces,
   };
 }

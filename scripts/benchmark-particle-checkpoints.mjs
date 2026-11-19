@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { cpus, platform, totalmem } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { System } from "three-nebula";
 import { createServer } from "vite";
 
 // Reuse the repository's original generated logo and animated noise ramp.
@@ -39,9 +40,7 @@ try {
   assert.deepEqual(roundTrip.scene, doc);
   if (process.argv[2]) await writeFile(resolve(process.argv[2]), archive);
 
-  async function measure(simulation, frame, measurePoses) {
-    measurePoses.reset();
-    const start = performance.now();
+  async function measure(simulation, frame, measurePoses, start = performance.now()) {
     const result = await simulation.snapshotAt(frame);
     return { result, ms: performance.now() - start, historicalPoseSamples: measurePoses.count() };
   }
@@ -54,18 +53,34 @@ try {
       count() { return calls; },
     };
   }
+  let observedEmitter;
+  const addEmitter = System.prototype.addEmitter;
+  System.prototype.addEmitter = function (emitter) {
+    observedEmitter = emitter;
+    return addEmitter.call(this, emitter);
+  };
+  const particleState = () => observedEmitter.particles.map(({ id, spawnIndex, age, position }) =>
+    [id, spawnIndex, age, position.x, position.y, position.z]);
+  const prewarmStart = performance.now();
   const warmPose = instrumentPose();
   const warm = createParticleSimulation(doc, shape, warmPose, undefined, new ParticleCheckpointCache());
+  const prewarmRange = { start: 160, end: 312 };
   const seekResults = [];
   try {
-    const prime = await measure(warm, 312, warmPose);
+    const checkpoints = await warm.prewarm(prewarmRange, new AbortController().signal, () => {});
+    const prewarmMs = performance.now() - prewarmStart;
+    assert.ok(checkpoints > 1);
     for (const frame of [242.4, 177.2, 281.4, 216.8]) {
+      const coldStart = performance.now();
       const coldPose = instrumentPose();
       const cold = createParticleSimulation(doc, shape, coldPose, undefined, null);
       try {
-        const replay = await measure(cold, frame, coldPose);
+        const replay = await measure(cold, frame, coldPose, coldStart);
+        const coldState = particleState();
+        warmPose.reset();
         const cached = await measure(warm, frame, warmPose);
         assert.deepEqual(cached.result, replay.result);
+        assert.deepEqual(particleState(), coldState);
         assert.ok(cached.historicalPoseSamples < replay.historicalPoseSamples);
         seekResults.push({
           frame, liveParticles: cached.result.count,
@@ -82,14 +97,16 @@ try {
       fixture: { candidatesPerSecond: shape.rate, lifetimeSeconds: shape.lifetime, framesPerSecond: doc.animation.fps, vertices: mesh.vertices.length, faces: mesh.faces.length,
         graphNodes: doc.proceduralGraph.nodes.length, elapsedSeconds: shape.endFrame / doc.animation.fps,
         cacheBytes: PARTICLE_CHECKPOINT_BYTES, checkpointStepInterval: PARTICLE_CHECKPOINT_INTERVAL },
-      primeMs: Number(prime.ms.toFixed(2)),
+      prewarm: { ...prewarmRange, checkpoints, msIncludingSetup: Number(prewarmMs.toFixed(2)) },
       seekResults,
       speedup: Number((sum("coldMs") / sum("warmMs")).toFixed(2)),
-      matched: "byte-identical particle display buffers, counts and simulation frames",
-      limit: "Node CPU simulation wall time with cooperative yields, no decode, renderer or UI. Cold seeks disable checkpoints and use fresh pose samplers. Warm targets are distinct and miss the frame output cache.",
+      speedupIncludingPrewarm: Number((sum("coldMs") / (prewarmMs + sum("warmMs"))).toFixed(2)),
+      matched: "exact particle positions, ages and IDs, byte-identical display buffers, counts and simulation frames",
+      limit: "Node CPU simulation wall time with cooperative yields. Cold seeks disable checkpoints and include setup. Warm targets are distinct and miss the frame output cache. The prewarm cost includes setup. Archive I/O and GPU rendering are outside the timings.",
     }, null, 2));
   } finally {
     warm.dispose();
+    System.prototype.addEmitter = addEmitter;
   }
 } finally {
   await server.close();

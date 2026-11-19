@@ -1,6 +1,7 @@
 import { BufferGeometry, Color as ThreeColor, Float32BufferAttribute, Matrix3, Matrix4, Mesh, MeshBasicMaterial, Quaternion, Triangle, Vector2, Vector3 } from "three";
 import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
 import { Alpha, Attraction, Color, CurlNoise, Emitter, Force, Life, Mass, Particle, Position, Radius, Rate, Scale, Span, System, Vector3D, type Behaviour } from "three-nebula";
+import { defaultAnimation } from "./animation.ts";
 import { triangulateMesh } from "./mesh-modeling.ts";
 import { MAX_PARTICLES_PER_EMITTER, PARTICLE_STEP_SECONDS, potentialParticleCount, validateParticleEmitters, validateParticleShape, type ParticleShapeNode } from "./particle-emitter.ts";
 import { createParticlePoseSampler } from "./particle-pose-sampler.ts";
@@ -21,9 +22,20 @@ export type ParticleFrame = {
   simulationFrame: number;
 };
 export type ParticlePoseSampler = { worldAt(frame: number): ReadonlyMap<string, Matrix4> };
-export type ParticleSimulation = { snapshotAt(frame: number): Promise<ParticleFrame>; dispose(): void };
+export type ParticlePrewarmRange = { start: number; end: number };
+export type ParticleSimulation = {
+  snapshotAt(frame: number): Promise<ParticleFrame>;
+  prewarm(range: ParticlePrewarmRange, signal: AbortSignal, onProgress: (percent: number) => void): Promise<number>;
+  dispose(): void;
+};
 
 const OUTPUT_CACHE_SIZE = 4;
+const MAX_PREWARM_STEPS = 15 * 120;
+const MAX_PREWARM_PARTICLE_STEPS = 30_000_000;
+const MAX_PREWARM_STAGING_BYTES = 16 * 1024 * 1024;
+const MAX_PREWARM_MS = 20_000;
+const CHECKPOINT_METADATA_BYTES = 512;
+const yieldToBrowser = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 const Y_AXIS = new Vector3(0, 1, 0);
 const abortError = () => new DOMException("Particle evaluation was superseded or disposed.", "AbortError");
 const emptyFrame = (simulationFrame: number): ParticleFrame => ({ positions: new Float32Array(), colors: new Float32Array(), sizes: new Float32Array(), opacities: new Float32Array(), count: 0, simulationFrame });
@@ -239,7 +251,7 @@ async function restoreCheckpoint(active: Engine, checkpoint: ParticleCheckpoint,
  * completed steps and belong to one simulation of one document revision. */
 export function createParticleSimulation(doc: SceneDocument, shape: ParticleShapeNode, sampler: ParticlePoseSampler = createParticlePoseSampler(doc), imagePixels?: ReadonlyMap<string, PixelSource>, checkpoints: ParticleCheckpointCache | null = sharedParticleCheckpoints): ParticleSimulation {
   validateParticleShape(shape);
-  const fps = doc.animation?.fps ?? 24;
+  const { fps, start: playbackStart, end: playbackEnd } = doc.animation ?? defaultAnimation();
   if (!Number.isFinite(fps) || fps < 1 || fps > 240) throw Error("Particle frame rate must be within 1–240.");
   if (potentialParticleCount(shape) > MAX_PARTICLES_PER_EMITTER) throw Error("Particle simulation exceeds the 20,000 live particle limit.");
   const duration = (shape.endFrame - shape.startFrame) / fps;
@@ -264,7 +276,7 @@ export function createParticleSimulation(doc: SceneDocument, shape: ParticleShap
   let surface: Surface | undefined;
   let surfacePrepared = false;
   let engine: Engine | undefined;
-  let generation = 0, disposed = false;
+  let generation = 0, disposed = false, prewarming = false;
   const outputs = new Map<number, ParticleFrame>();
   const checkpointOwner = Symbol("particle replay");
 
@@ -306,19 +318,158 @@ export function createParticleSimulation(doc: SceneDocument, shape: ParticleShap
     return copyFrame(output);
   }
 
+  function stepAt(frame: number): number {
+    // Correct only floating point noise at integer step boundaries. A genuinely
+    // fractional request always selects the preceding completed step.
+    const rawStep = (frame - shape.startFrame) / fps / PARTICLE_STEP_SECONDS;
+    const nearest = Math.round(rawStep);
+    const roundoff = 8 * Number.EPSILON * Math.max(1, Math.abs(frame), Math.abs(shape.startFrame)) / fps / PARTICLE_STEP_SECONDS;
+    const targetStep = Math.abs(rawStep - nearest) <= roundoff ? nearest : Math.floor(rawStep);
+    if (!Number.isSafeInteger(targetStep)) throw Error("Particle frame is outside the supported evaluation range.");
+    return targetStep;
+  }
+
+  function scheduleReplay(check: () => void) {
+    let yieldedAt = performance.now();
+    return async () => {
+      check();
+      if (performance.now() - yieldedAt >= 4) {
+        await yieldToBrowser();
+        check();
+        yieldedAt = performance.now();
+      }
+    };
+  }
+
+  async function replay(targetStep: number, checkpoint: ParticleCheckpoint | undefined, check: () => void,
+    yieldIfNeeded: () => Promise<void>, onStep: (active: Engine) => void): Promise<Engine> {
+    if (images.length && !pixels) pixels = await decodeParticleMapImages(images, check);
+    if (!surfacePrepared) {
+      surface = source?.type === "meshShape" ? makeSurface(source) : undefined;
+      surfacePrepared = true;
+    }
+    if (!engine || targetStep < engine.step || (checkpoint && checkpoint.step > engine.step)) {
+      releaseEngine();
+      if (surface) {
+        // Metric equality is approximate. Rebuild from the exact matrix
+        // that produced the checkpoint's distribution, not the last seek's.
+        const weightWorld = checkpoint?.surfaceWorld;
+        if (weightWorld) {
+          const world = new Matrix4().fromArray(weightWorld);
+          if (!surface.weightWorld?.equals(world)) await buildSurfaceWeights(surface, world, surfaceMetric(world), yieldIfNeeded, check);
+        } else {
+          surface.metric = undefined;
+          surface.weightWorld = undefined;
+        }
+      }
+      check();
+      // A superseding request may start while a large checkpoint is
+      // restoring. Publish only after the entire engine is ready.
+      const prepared = makeEngine();
+      try {
+        if (checkpoint) await restoreCheckpoint(prepared, checkpoint, yieldIfNeeded);
+        check();
+        engine = prepared;
+      } catch (error) {
+        destroyEngine(prepared);
+        throw error;
+      }
+    }
+    const active = engine;
+    while (active.step < targetStep) {
+      check();
+      const from = Math.min(active.step * PARTICLE_STEP_SECONDS, duration), to = Math.min((active.step + 1) * PARTICLE_STEP_SECONDS, duration);
+      // ceil includes t=0. Snap roundoff near positive integer boundaries,
+      // but preserve the first birth even for extremely small positive rates.
+      const countAt = (seconds: number) => {
+        if (seconds <= 0) return 0;
+        const value = seconds * shape.rate, rounded = Math.round(value);
+        return rounded > 0 && Math.abs(value - rounded) <= 8 * Number.EPSILON * Math.max(1, value) ? rounded : Math.max(1, Math.ceil(value));
+      };
+      let births = countAt(to) - countAt(from);
+      if (active.emitter.particles.length + births > MAX_PARTICLES_PER_EMITTER) throw Error("Particle simulation would exceed 20,000 live particles.");
+      const birthFrame = shape.startFrame + active.step * PARTICLE_STEP_SECONDS * fps;
+      let birthWorld: Matrix4 | undefined;
+      if (births > 0) {
+        const world = sampler.worldAt(birthFrame).get(shape.parentId);
+        if (!world) throw Error("Historical particle emitter transform is missing.");
+        birthWorld = world;
+        active.spawn.setWorld(world);
+        if (surface) {
+          const metric = surfaceMetric(world);
+          if (!sameMetric(surface.metric, metric)) {
+            await buildSurfaceWeights(surface, world, metric, yieldIfNeeded, check);
+          }
+        }
+        check();
+        if (map && mapProgram && surface) {
+          const accepted: { point: Vector3; normal: Vector3 }[] = [];
+          for (let candidate = countAt(from); candidate < countAt(to); candidate++) {
+            const random = particleCandidateRandom(shape.seed, candidate), point = new Vector3(), normal = new Vector3(), uv = new Vector2();
+            surface.sampler.setRandomGenerator(random).sample(point, normal, undefined, uv);
+            const local = point.toArray() as [number, number, number];
+            const rgba = mapProgram.sample({ uv: particleMapUV(map, local, uv.toArray()), position: local, frame: birthFrame, fps }, pixels);
+            if (random() < particleMapDensity(map, rgba)) accepted.push({ point, normal });
+          }
+          active.spawn.mapped = accepted; active.spawn.mappedIndex = 0; births = accepted.length;
+        }
+      }
+      check();
+      if (active.field && (births || active.emitter.particles.length)) {
+        const world = field!.space === "emitter" ? birthWorld ?? sampler.worldAt(birthFrame).get(shape.parentId) : undefined;
+        active.field.setFrame(birthFrame, world);
+        // Prepare the expensive graph evaluations before Nebula advances
+        // any live particle. Only newly appended births sample in update().
+        await active.field.prepare(active.emitter.particles, PARTICLE_STEP_SECONDS, yieldIfNeeded, check);
+        check();
+      }
+      active.rate.pending = births;
+      // CPU work happens synchronously; the returned Promise is already
+      // resolved. Explicit chunk yields, not microtask awaits, keep UI live.
+      void active.system.update(PARTICLE_STEP_SECONDS);
+      active.spawn.mapped = []; active.spawn.mappedIndex = 0;
+      active.step++;
+      onStep(active);
+      await yieldIfNeeded();
+    }
+    check();
+    return active;
+  }
+
+  function validatePrewarm({ start, end }: ParticlePrewarmRange) {
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start < playbackStart || end > playbackEnd) {
+      throw Error(`Enter whole start and end frames in playback range ${playbackStart}–${playbackEnd}, with start at or before end.`);
+    }
+    const first = Math.max(1, stepAt(start));
+    const last = Math.min(stepAt(end), Math.ceil((duration + shape.lifetime + PARTICLE_STEP_SECONDS) / PARTICLE_STEP_SECONDS) - 1);
+    if (!shape.enabled || !shape.rate || first > last || (source?.type === "meshShape" && !source.faces.length)) {
+      throw Error("Choose a range that overlaps the enabled emitter's simulation.");
+    }
+    const checkpoint = checkpoints?.find(checkpointOwner, first);
+    const steps = last - (checkpoint?.step ?? 0);
+    const live = potentialParticleCount(shape);
+    if (steps > MAX_PREWARM_STEPS || steps * live > MAX_PREWARM_PARTICLE_STEPS) {
+      throw Error("Prewarm exceeds the simulation work limit, including replay before the requested start. Shorten the range or cache it in sections.");
+    }
+    const interval = PARTICLE_CHECKPOINT_INTERVAL;
+    const count = first === last ? 1 : Math.floor((last - 1) / interval) - Math.floor(first / interval) + 2;
+    if (count * (live * PARTICLE_STATE_WIDTH * Float64Array.BYTES_PER_ELEMENT + CHECKPOINT_METADATA_BYTES) > MAX_PREWARM_STAGING_BYTES) {
+      throw Error("Prewarm exceeds the 16 MiB staging limit. Shorten the range.");
+    }
+    return { first, last, checkpoint, steps };
+  }
+
   return {
     async snapshotAt(frame) {
       const request = ++generation;
+      if (prewarming) {
+        prewarming = false;
+        releaseEngine();
+      }
       const check = () => { if (disposed || request !== generation) throw abortError(); };
       check();
       if (!Number.isFinite(frame)) throw Error("Particle frame must be finite.");
-      // Correct only floating point noise at integer step boundaries. A genuinely
-      // fractional request always selects the preceding completed step.
-      const rawStep = (frame - shape.startFrame) / fps / PARTICLE_STEP_SECONDS;
-      const nearest = Math.round(rawStep);
-      const roundoff = 8 * Number.EPSILON * Math.max(1, Math.abs(frame), Math.abs(shape.startFrame)) / fps / PARTICLE_STEP_SECONDS;
-      const targetStep = Math.abs(rawStep - nearest) <= roundoff ? nearest : Math.floor(rawStep);
-      if (!Number.isSafeInteger(targetStep)) throw Error("Particle frame is outside the supported evaluation range.");
+      const targetStep = stepAt(frame);
       const simulationFrame = shape.startFrame + targetStep * PARTICLE_STEP_SECONDS * fps;
       const elapsed = targetStep * PARTICLE_STEP_SECONDS;
       if (!shape.enabled || shape.rate === 0 || targetStep <= 0 || elapsed >= duration + shape.lifetime + PARTICLE_STEP_SECONDS || (source?.type === "meshShape" && !source.faces.length)) return emptyFrame(simulationFrame);
@@ -327,110 +478,17 @@ export function createParticleSimulation(doc: SceneDocument, shape: ParticleShap
       const outputKey = appearance ? frame : targetStep;
       const cached = outputs.get(outputKey);
       if (cached) return remember(outputKey, cached);
-      let yieldedAt = performance.now();
-      const yieldIfNeeded = async () => {
-        check();
-        if (performance.now() - yieldedAt >= 4) {
-          await new Promise<void>(resolve => setTimeout(resolve, 0));
-          check(); yieldedAt = performance.now();
-        }
-      };
+      const yieldIfNeeded = scheduleReplay(check);
 
       try {
-        if (images.length && !pixels) pixels = await decodeParticleMapImages(images, check);
-        if (!surfacePrepared) {
-          surface = source?.type === "meshShape" ? makeSurface(source) : undefined;
-          surfacePrepared = true;
-        }
         const checkpoint = checkpoints?.find(checkpointOwner, targetStep);
-        if (!engine || targetStep < engine.step || (checkpoint && checkpoint.step > engine.step)) {
-          releaseEngine();
-          if (surface) {
-            // Metric equality is approximate. Rebuild from the exact matrix
-            // that produced the checkpoint's distribution, not the last seek's.
-            const weightWorld = checkpoint?.surfaceWorld;
-            if (weightWorld) {
-              const world = new Matrix4().fromArray(weightWorld);
-              if (!surface.weightWorld?.equals(world)) await buildSurfaceWeights(surface, world, surfaceMetric(world), yieldIfNeeded, check);
-            } else {
-              surface.metric = undefined;
-              surface.weightWorld = undefined;
-            }
-          }
-          check();
-          // A superseding request may start while a large checkpoint is
-          // restoring. Publish only after the entire engine is ready.
-          const prepared = makeEngine();
-          try {
-            if (checkpoint) await restoreCheckpoint(prepared, checkpoint, yieldIfNeeded);
-            check();
-            engine = prepared;
-          } catch (error) {
-            destroyEngine(prepared);
-            throw error;
-          }
-        }
-        const active = engine;
-        while (active.step < targetStep) {
-          check();
-          const from = Math.min(active.step * PARTICLE_STEP_SECONDS, duration), to = Math.min((active.step + 1) * PARTICLE_STEP_SECONDS, duration);
-          // ceil includes t=0. Snap roundoff near positive integer boundaries,
-          // but preserve the first birth even for extremely small positive rates.
-          const countAt = (seconds: number) => {
-            if (seconds <= 0) return 0;
-            const value = seconds * shape.rate, rounded = Math.round(value);
-            return rounded > 0 && Math.abs(value - rounded) <= 8 * Number.EPSILON * Math.max(1, value) ? rounded : Math.max(1, Math.ceil(value));
-          };
-          let births = countAt(to) - countAt(from);
-          if (active.emitter.particles.length + births > MAX_PARTICLES_PER_EMITTER) throw Error("Particle simulation would exceed 20,000 live particles.");
-          const birthFrame = shape.startFrame + active.step * PARTICLE_STEP_SECONDS * fps;
-          let birthWorld: Matrix4 | undefined;
-          if (births > 0) {
-            const world = sampler.worldAt(birthFrame).get(shape.parentId);
-            if (!world) throw Error("Historical particle emitter transform is missing.");
-            birthWorld = world;
-            active.spawn.setWorld(world);
-            if (surface) {
-              const metric = surfaceMetric(world);
-              if (!sameMetric(surface.metric, metric)) {
-                await buildSurfaceWeights(surface, world, metric, yieldIfNeeded, check);
-              }
-            }
-            check();
-            if (map && mapProgram && surface) {
-              const accepted: { point: Vector3; normal: Vector3 }[] = [];
-              for (let candidate = countAt(from); candidate < countAt(to); candidate++) {
-                const random = particleCandidateRandom(shape.seed, candidate), point = new Vector3(), normal = new Vector3(), uv = new Vector2();
-                surface.sampler.setRandomGenerator(random).sample(point, normal, undefined, uv);
-                const local = point.toArray() as [number, number, number];
-                const rgba = mapProgram.sample({ uv: particleMapUV(map, local, uv.toArray()), position: local, frame: birthFrame, fps }, pixels);
-                if (random() < particleMapDensity(map, rgba)) accepted.push({ point, normal });
-              }
-              active.spawn.mapped = accepted; active.spawn.mappedIndex = 0; births = accepted.length;
-            }
-          }
-          check();
-          if (active.field && (births || active.emitter.particles.length)) {
-            const world = field!.space === "emitter" ? birthWorld ?? sampler.worldAt(birthFrame).get(shape.parentId) : undefined;
-            active.field.setFrame(birthFrame, world);
-            // Prepare the expensive graph evaluations before Nebula advances
-            // any live particle. Only newly appended births sample in update().
-            await active.field.prepare(active.emitter.particles, PARTICLE_STEP_SECONDS, yieldIfNeeded, check);
-            check();
-          }
-          active.rate.pending = births;
-          // CPU work happens synchronously; the returned Promise is already
-          // resolved. Explicit chunk yields, not microtask awaits, keep UI live.
-          void active.system.update(PARTICLE_STEP_SECONDS);
-          active.spawn.mapped = []; active.spawn.mappedIndex = 0;
-          active.step++;
+        const active = await replay(targetStep, checkpoint, check, yieldIfNeeded, active => {
           if (checkpoints && active.step % PARTICLE_CHECKPOINT_INTERVAL === 0 &&
               checkpoints.find(checkpointOwner, active.step)?.step !== active.step) {
             const checkpoint = captureCheckpoint(active, surface);
             if (checkpoint.particles.every(Number.isFinite)) checkpoints.add(checkpointOwner, checkpoint);
           }
-          await yieldIfNeeded();
-        }
+        });
         check();
         const particles = active.emitter.particles, count = particles.length;
         const output: ParticleFrame = { count, simulationFrame, positions: new Float32Array(count * 3), colors: new Float32Array(count * 3), sizes: new Float32Array(count), opacities: new Float32Array(count) };
@@ -460,6 +518,53 @@ export function createParticleSimulation(doc: SceneDocument, shape: ParticleShap
       } catch (error) {
         if (request === generation && !disposed) releaseEngine();
         throw error;
+      }
+    },
+    async prewarm(range, signal, onProgress) {
+      if (disposed || signal.aborted) throw abortError();
+      if (!checkpoints) throw Error("Particle replay cache is unavailable.");
+      const { first, last, checkpoint, steps } = validatePrewarm(range);
+      const base = checkpoint?.step ?? 0;
+      const request = ++generation;
+      const deadline = performance.now() + MAX_PREWARM_MS;
+      const check = () => {
+        if (disposed || signal.aborted || request !== generation) throw abortError();
+        if (performance.now() >= deadline) throw Error("Prewarm reached its 20-second time limit. Shorten the range.");
+      };
+      const staged: ParticleCheckpoint[] = [];
+      const stage = (checkpoint: ParticleCheckpoint) => {
+        if (!checkpoint.particles.every(Number.isFinite)) throw Error("Particle simulation produced non-finite state.");
+        staged.push(checkpoint);
+      };
+      if (checkpoint?.step === first) stage(checkpoint);
+      prewarming = true;
+      releaseEngine();
+      try {
+        // Paint the running status and give the user a chance to cancel first.
+        await yieldToBrowser();
+        check();
+        let lastPercent = 0;
+        let lastProgressAt = performance.now();
+        await replay(last, checkpoint, check, scheduleReplay(check), active => {
+          const step = active.step;
+          if (step === first || step === last || step > first && step % PARTICLE_CHECKPOINT_INTERVAL === 0) {
+            stage(captureCheckpoint(active, surface));
+          }
+          const percent = Math.min(99, Math.floor(100 * (step - base) / steps));
+          const now = performance.now();
+          if (percent > lastPercent && now - lastProgressAt >= 100) {
+            lastPercent = percent;
+            lastProgressAt = now;
+            onProgress(percent);
+          }
+        });
+        check();
+        return checkpoints.publishPrewarm(checkpointOwner, staged);
+      } finally {
+        if (request === generation && !disposed) {
+          prewarming = false;
+          releaseEngine();
+        }
       }
     },
     dispose() {
