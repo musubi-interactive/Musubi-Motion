@@ -44,3 +44,12 @@ it("rejects impossible allocation, nonpositive weights, oversized and canceled j
   await expect(previewWeightCleanup(context,op,()=>false)).rejects.toThrow(/200,000/);
   await expect(previewWeightCleanup({...context,count:100},op,()=>true)).rejects.toThrow(/canceled/i);
 });
+
+it("retains the target when an all-held neighborhood supplies no free proportions", async()=>{
+  const points:Vec3[]=[[0,0,0],[.1,0,0],[1,0,0],[1.1,0,0]];
+  const rows=[[{jointId:"held",weight:.25},{jointId:"left",weight:.5},{jointId:"right",weight:.25}],
+    [{jointId:"held",weight:1}], [{jointId:"left",weight:1}], [{jointId:"right",weight:1}]];
+  const context:CleanupContext={count:4,locked:new Set(["held"]),getWeights:i=>rows[i],restPosition:i=>points[i]};
+  const result=await previewWeightCleanup(context,{kind:"smooth",strength:1,radius:.2,targets:[0,2]},()=>false);
+  expect(result.matched).toBe(2);expect([...result.changes.keys()]).toEqual(["2"]);expect(result.changes.get("2")).toEqual(rows[3]);
+});

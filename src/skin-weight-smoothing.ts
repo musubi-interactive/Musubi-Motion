@@ -74,5 +74,10 @@ export function smoothSkinRow(context: CleanupContext, grid: SkinNeighborhood, i
   for (const neighbor of neighbors) for (const {jointId, weight} of context.getWeights(neighbor)) {
     desired.set(jointId, (desired.get(jointId) ?? 0) + amount * weight / neighbors.length);
   }
+  // An all-held neighborhood has no unlocked proportions to contribute.
+  // Keep this target's existing free allocation instead of discarding the stroke.
+  if (![...desired].some(([id, weight]) => weight > 0 && !context.locked.has(id))) {
+    return allocateSkinRow(current, new Map(current.map(row => [row.jointId, row.weight])), context.locked);
+  }
   return allocateSkinRow(current, desired, context.locked);
 }

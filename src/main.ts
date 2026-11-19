@@ -2693,7 +2693,7 @@ async function start() {
     | { tool: "sphere" }
     | { tool: "radial" };
   let gesture:
-    { x: number; y: number; id: number; additive: boolean; subtract: boolean; component?: string; splat?: NonNullable<ReturnType<typeof splatScanSnapshot>>;
+    { x: number; y: number; id: number; additive: boolean; subtract: boolean; component?: NonNullable<ReturnType<typeof skinPickSnapshot>>; splat?: NonNullable<ReturnType<typeof splatScanSnapshot>>;
       splatPath?: SplatPointerPath;
       mesh?: { request: NonNullable<typeof meshComponentRequest>; document: SceneDocument; poseVersion: number;
         camera: THREE.Camera; world: THREE.Matrix4; projection: THREE.Matrix4; rect: DOMRect } } | undefined;
@@ -2705,13 +2705,13 @@ async function start() {
     previewSplatRadius = undefined;
     showSplatRegion();
     if (captured?.splat) refreshSplatPanel();
-    if (captured?.splat && webgl.domElement.hasPointerCapture(captured.id)) webgl.domElement.releasePointerCapture(captured.id);
+    if ((captured?.splat || captured?.component) && webgl.domElement.hasPointerCapture(captured.id)) webgl.domElement.releasePointerCapture(captured.id);
     controls.enabled = !transform.dragging;
   }
   const splatPointer = (event: PointerEvent, rect: DOMRect) => ({ x: event.clientX - rect.left, y: event.clientY - rect.top });
   const splatResizeRadius = (radius: number, delta: number) => THREE.MathUtils.clamp(Math.round(radius + delta), 1, MAX_SPLAT_BRUSH_RADIUS);
   function cancelInvalidSplatGesture() {
-    const scan = gesture?.splat;
+    const scan = gesture?.splat ?? gesture?.component;
     if (!scan?.cancelled()) return false;
     if (pendingComponentPick === scan.epoch) cancelComponentScan("Selection canceled because the scene or view changed.");
     cancelSelection();
@@ -2749,8 +2749,8 @@ async function start() {
       notice.textContent = `${ids.length.toLocaleString()} ${mode} components selected. Edit them in Mesh Tools.`;
     } catch (error) { notice.textContent = error instanceof Error ? error.message : String(error); }
   }
-  async function pickSkinComponents(start: NonNullable<typeof gesture>, event: PointerEvent) {
-    const shapeId = start.component!, entry = bindings.get(shapeId);
+  function skinPickSnapshot(shapeId: string) {
+    const entry = bindings.get(shapeId);
     if (!entry || componentPickShape !== shapeId || playing || loading || dragId) return;
     for (let parent: THREE.Object3D | null = entry.mesh; parent; parent = parent.parent) {
       if (!parent.visible) { notice.textContent = "The component object is hidden."; return; }
@@ -2761,6 +2761,7 @@ async function start() {
     const documentRef = store.getState().document, poseVersion = skinPoseVersion;
     const epoch = ++componentPickEpoch; pendingComponentPick = epoch;
     const cancelled = () => {
+      camera.updateWorldMatrix(true, false); entry.mesh.updateWorldMatrix(true, false);
       const current = webgl.domElement.getBoundingClientRect();
       return epoch !== componentPickEpoch || componentPickShape !== shapeId || playing || loading || !!dragId
         || documentRef !== store.getState().document || poseVersion !== skinPoseVersion || bindings.get(shapeId)?.skin !== entry.skin
@@ -2768,9 +2769,14 @@ async function start() {
         || !entry.mesh.matrixWorld.equals(meshWorld) || current.width !== rect.width || current.height !== rect.height
         || current.left !== rect.left || current.top !== rect.top;
     };
+    return {shapeId, entry, rect, cameraRef, meshWorld, cancelled, epoch};
+  }
+  async function pickSkinComponents(start: NonNullable<typeof gesture>, event: PointerEvent) {
+    const {shapeId, entry, rect, cameraRef, meshWorld, cancelled, epoch} = start.component!;
     notice.textContent = "Selecting components… Esc cancels.";
     let lastYield = performance.now();
     try {
+      if (cancelled()) throw new DOMException("Component selection canceled.", "AbortError");
       const depth = skinWeightsPanel?.getPickDepth() ?? "through";
       const indices = await pickSplatComponents({
         depth, readDepth: depth === "scene-visible" ? readSceneDepth : undefined,
@@ -2885,13 +2891,13 @@ async function start() {
       id: event.pointerId,
       additive: event.shiftKey,
       subtract: event.ctrlKey || event.metaKey,
-      component: componentPickShape,
+      component: componentPickShape ? skinPickSnapshot(componentPickShape) : undefined,
       splat: splatComponent && !playing ? (() => { try { return splatScanSnapshot(); } catch (error) { notice.textContent = (error as Error).message; return undefined; } })() : undefined,
       mesh: meshComponentRequest ? { request: meshComponentRequest, document: store.getState().document,
         poseVersion: skinPoseVersion, camera, world: camera.matrixWorld.clone(), projection: camera.projectionMatrix.clone(),
         rect: webgl.domElement.getBoundingClientRect() } : undefined,
     };
-    if (splatComponent && !gesture.splat) { cancelSelection(); return; }
+    if (splatComponent && !gesture.splat || componentPickShape && !gesture.component) { cancelSelection(); return; }
     if (gesture.splat && splatSelectionTool !== "box") {
       const rect = gesture.splat.rect, start = splatPointer(event, rect);
       try {
