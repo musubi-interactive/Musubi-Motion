@@ -1,9 +1,11 @@
 import { dyno, type SplatMesh } from "@sparkjsdev/spark";
 import { Box3, DataTexture, FloatType, Matrix4, Ray, RGBAFormat, Sphere, Vector3, type Raycaster } from "three";
 import type { SplatAppearanceRead } from "./splat-appearance-runtime.ts";
-import { componentTransformLookup, gaussianFactor, type SplatComponentTransforms } from "./splat-component-transforms.ts";
-import { evaluateSplatDeformers, type SplatDeformer } from "./splat-deformers.ts";
+import { gaussianFactor, type SplatComponentTransforms } from "./splat-component-transforms.ts";
+import { prepareSplatDeformerEvaluation, type SplatDeformer } from "./splat-deformers.ts";
 import type { SplatScalarMask } from "./splat-masks.ts";
+
+import { prepareSplatMorphPose, type SplatMorphPose } from "./splat-morph.ts";
 
 const NO_DEFORMERS: readonly SplatDeformer[] = [];
 const NO_MASKS: readonly SplatScalarMask[] = [];
@@ -12,26 +14,25 @@ const NO_MASKS: readonly SplatScalarMask[] = [];
  * and c1.w store the low/high 16-bit source index words exactly. Tiling
  * keeps the texture within WebGL2 minimum dimension limits. */
 export function createSplatTransformRuntime(mesh: SplatMesh) {
-  let value: SplatComponentTransforms | undefined, bound = false;
-  let prepared: {
-    component: SplatComponentTransforms | undefined;
-    deformers: readonly SplatDeformer[];
-    masks: readonly SplatScalarMask[];
-    frame: number;
-    compiled: SplatComponentTransforms | undefined;
-  } | undefined;
-  let lookup = componentTransformLookup();
-  let texture = new DataTexture(new Float32Array(4096), 1024, 1, RGBAFormat, FloatType);
-  const sampler = dyno.dynoSampler2D(texture), count = dyno.dynoInt(0);
+  type Pose = { component?: SplatComponentTransforms; deformers: readonly SplatDeformer[];
+    masks: readonly SplatScalarMask[]; frame: number; morph?: SplatMorphPose };
+  type Packed = { data: Float32Array<ArrayBuffer>; count: number; direct: boolean; value?: SplatComponentTransforms };
+  type Prepared = { pose: Pose; packed: Packed };
+  let current: Prepared | undefined, previous: Prepared | undefined, prepared: Prepared | undefined;
+  let bound = false, dynamicSource = false, disposed = false;
+  let metadata: Float32Array | undefined, metadataReady: Uint8Array | undefined;
+  const empty: Packed = { data: new Float32Array(4096), count: 0, direct: true };
+  let texture = new DataTexture(empty.data, 1024, 1, RGBAFormat, FloatType);
+  const sampler = dyno.dynoSampler2D(texture), count = dyno.dynoInt(0), direct = dyno.dynoBool(true);
   const modifier = new dyno.Dyno({
-    inTypes: { covsplat: dyno.CovSplat, matrices: "sampler2D", count: "int" },
-    outTypes: { covsplat: dyno.CovSplat }, inputs: { matrices: sampler, count },
+    inTypes: { covsplat: dyno.CovSplat, matrices: "sampler2D", count: "int", direct: "bool" },
+    outTypes: { covsplat: dyno.CovSplat }, inputs: { matrices: sampler, count, direct },
     statements: ({ inputs, outputs }) => {
       const s = outputs.covsplat, input = inputs.covsplat, t = inputs.matrices, n = inputs.count;
       return [
         `${s} = ${input};`,
         `if (isCovSplatActive(${s}.flags)) {`,
-        ` int lo = 0; int hi = ${n};`,
+        ` int lo = ${inputs.direct} ? ${s}.index : 0; int hi = ${inputs.direct} ? lo : ${n};`,
         ` for (int step = 0; step < 18; ++step) {`,
         `  if (lo >= hi) break;`,
         `  int mid = (lo + hi) / 2;`,
@@ -41,7 +42,7 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
         `  int key = int(key0.w) + (int(key1.w) << 16);`,
         `  if (key < ${s}.index) lo = mid + 1; else hi = mid;`,
         ` }`,
-        ` if (lo < ${n}) {`,
+        ` if (lo >= 0 && lo < ${n}) {`,
         `  vec4 c0 = texelFetch(${t}, ivec2((lo % 256) * 4, lo / 256), 0);`,
         `  vec4 c1 = texelFetch(${t}, ivec2((lo % 256) * 4 + 1, lo / 256), 0);`,
         `  int key = int(c0.w) + (int(c1.w) << 16);`,
@@ -63,42 +64,153 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
   });
   mesh.covObjectModifiers = [...(mesh.covObjectModifiers ?? []), modifier];
   mesh.updateGenerator();
-  function prepare(component: SplatComponentTransforms | undefined, deformers = NO_DEFORMERS, masks = NO_MASKS, frame = 0) {
-    const sampleFrame = deformers.some(deformer => deformer.keys?.length) ? frame : 0;
-    const sourceMasks = deformers.some(deformer => deformer.maskId) ? masks : NO_MASKS;
-    if (prepared && prepared.component === component && prepared.deformers === deformers && prepared.masks === sourceMasks && prepared.frame === sampleFrame)
-      return prepared.compiled;
+  function pose(component: SplatComponentTransforms | undefined, deformers = NO_DEFORMERS, masks = NO_MASKS, frame = 0, morph?: SplatMorphPose): Pose {
+    return { component, deformers, masks: deformers.some(d => d.maskId) ? masks : NO_MASKS,
+      frame: deformers.some(d => d.keys?.length) ? frame : 0, morph };
+  }
+  function matches(a: Pose, b: Pose) {
+    return a.component === b.component && a.deformers === b.deformers && a.masks === b.masks && a.frame === b.frame &&
+      (a.morph === b.morph || a.morph?.surface === b.morph?.surface && a.morph?.weights.length === b.morph?.weights.length &&
+        a.morph?.weights.every((weight, i) => weight === b.morph!.weights[i]));
+  }
+  function cached(next: Pose) {
+    if (disposed) throw Error("Splat transform runtime has been disposed.");
+    return [prepared, current, previous].find(entry => entry && matches(entry.pose, next));
+  }
+  function idAt(data: Float32Array, row: number) { return data[row * 16 + 3] + data[row * 16 + 7] * 65536; }
+  function readMatrix(data: Float32Array, row: number, target: Matrix4) {
+    target.fromArray(data, row * 16);
+    target.elements[3] = target.elements[7] = 0;
+    return target;
+  }
+  function lookup(index: number, target = new Matrix4()) {
+    const packed = current?.packed;
+    if (!packed || !packed.count || index < 0) return;
+    let row = index;
+    if (!packed.direct) {
+      let low = 0, high = packed.count;
+      while (low < high) {
+        const mid = (low + high) >>> 1;
+        if (idAt(packed.data, mid) < index) low = mid + 1; else high = mid;
+      }
+      row = low;
+    }
+    if (row < packed.count && (packed.direct || idAt(packed.data, row) === index)) return readMatrix(packed.data, row, target);
+  }
+  function compile(next: Pose) {
+    const { deformers, component, masks, frame, morph } = next;
     const source = mesh.extSplats ?? mesh.packedSplats;
-    const compiled = deformers.length ? evaluateSplatDeformers(deformers, sourceMasks, component, sampleFrame, (index, center) => {
-      const splat = source!.getSplat(index);
-      center.copy(splat.center);
-      return Math.max(splat.scales.x, splat.scales.y, splat.scales.z);
-    }) : component;
-    prepared = { component, deformers, masks: sourceMasks, frame: sampleFrame, compiled };
-    return compiled;
+    const sourceCount = morph?.surface.sourceCount ?? deformers[0]?.sourceCount ?? component?.sourceCount ?? 0;
+    const morphAt = morph && prepareSplatMorphPose(morph);
+    const evaluated = (deformers.length || morphAt) ? prepareSplatDeformerEvaluation(deformers, masks, component, frame, (index, center) => {
+      if (dynamicSource) {
+        const s = source!.getSplat(index);
+        center.copy(s.center);
+        return Math.max(s.scales.x, s.scales.y, s.scales.z);
+      }
+      metadata ??= new Float32Array(sourceCount * 4);
+      metadataReady ??= new Uint8Array(sourceCount);
+      const offset = index * 4;
+      if (!metadataReady[index]) {
+        const s = source!.getSplat(index);
+        s.center.toArray(metadata, offset);
+        metadata[offset + 3] = Math.max(s.scales.x, s.scales.y, s.scales.z);
+        metadataReady[index] = 1;
+      }
+      center.fromArray(metadata, offset);
+      return metadata[offset + 3];
+    }, sourceCount, morphAt) : undefined;
+    const length = evaluated?.length ?? component?.records.length ?? 0;
+    const data = length ? new Float32Array(Math.ceil(length / 256) * 4096) : empty.data;
+    let offset = 0, rows = 0, contiguous = true;
+    return {
+      step(limit: number) {
+        for (const end = Math.min(length, offset + limit); offset < end; offset++) {
+          const index = evaluated ? evaluated.index(offset) : component!.records[offset].index;
+          const elements = evaluated ? evaluated.matrix(index)?.elements : component!.records[offset].matrix;
+          if (!elements) continue;
+          const start = rows * 16;
+          data.set(elements, start);
+          data[start + 3] = index & 65535;
+          data[start + 7] = index >>> 16;
+          contiguous &&= rows === index;
+          rows++;
+        }
+        return offset === length;
+      },
+      finish(): Prepared {
+        if (!rows) return { pose: next, packed: empty };
+        // Application consumers only need a pose identity. Materialize archive-style
+        // records only when an explicit caller requests them.
+        let records: SplatComponentTransforms["records"] | undefined;
+        const value: SplatComponentTransforms = !evaluated?.changed && component ? component : {
+          version: 1, sourceCount, get records() {
+            const matrix = new Matrix4();
+            return records ??= Array.from({ length: rows }, (_, row) => ({
+              index: idAt(data, row), matrix: readMatrix(data, row, matrix).toArray(),
+            }));
+          },
+        };
+        return { pose: next, packed: { data, count: rows, direct: contiguous, value } };
+      },
+    };
+  }
+  function preparePose(next: Pose) {
+    const hit = cached(next);
+    if (hit) return hit;
+    const job = compile(next);
+    job.step(Infinity);
+    return prepared = job.finish();
   }
   return {
     modifier,
-    prepare,
-    get value() { return value; },
-    affine(index: number) { return lookup(index); },
-    update(component: SplatComponentTransforms | undefined, deformers = NO_DEFORMERS, masks = NO_MASKS, frame = 0) {
-      const next = prepare(component, deformers, masks, frame);
-      if (value === next) return false;
-      value = next; lookup = componentTransformLookup(next);
-      const data = new Float32Array(Math.max(1, Math.ceil((next?.records.length ?? 0) / 256)) * 4096);
-      next?.records.forEach((record, row) => {
-        data.set(record.matrix, row * 16);
-        data[row * 16 + 3] = record.index & 65535;
-        data[row * 16 + 7] = record.index >>> 16;
-      });
-      texture.dispose();
-      texture = new DataTexture(data, 1024, data.length / 4096, RGBAFormat, FloatType);
-      texture.needsUpdate = true; sampler.value = texture; count.value = next?.records.length ?? 0;
+    prepare(component: SplatComponentTransforms | undefined, deformers = NO_DEFORMERS, masks = NO_MASKS, frame = 0, morph?: SplatMorphPose) {
+      return preparePose(pose(component, deformers, masks, frame, morph)).packed.value;
+    },
+    async prepareInteractive(component: SplatComponentTransforms | undefined, deformers: readonly SplatDeformer[] | undefined,
+      masks: readonly SplatScalarMask[] | undefined, frame: number, morph: SplatMorphPose | undefined, signal: AbortSignal) {
+      const next = pose(component, deformers, masks, frame, morph);
+      if (cached(next)) return;
+      const job = compile(next);
+      do {
+        signal.throwIfAborted();
+        if (disposed) throw Error("Splat transform runtime has been disposed.");
+        const deadline = performance.now() + 4;
+        do {
+          if (job.step(128)) { prepared = job.finish(); return; }
+        } while (performance.now() < deadline);
+        // scheduler.yield gives input and rendering a turn even during continuous scrubs.
+        const scheduler = (globalThis as { scheduler?: { yield(): Promise<void> } }).scheduler;
+        if (scheduler) await scheduler.yield();
+        else await new Promise(resolve => setTimeout(resolve, 0));
+      } while (true);
+    },
+    get value() { return current?.packed.value; },
+    affine: lookup,
+    update(component: SplatComponentTransforms | undefined, deformers = NO_DEFORMERS, masks = NO_MASKS, frame = 0, morph?: SplatMorphPose) {
+      const next = preparePose(pose(component, deformers, masks, frame, morph));
+      if (next === current) return false;
+      const before = current?.packed.value;
+      previous = current;
+      current = next;
+      prepared = undefined;
+      const packed = next.packed;
+      if (before === packed.value) return false;
+      if (texture.image.height !== packed.data.length / 4096) {
+        texture.dispose();
+        texture = new DataTexture(packed.data, 1024, packed.data.length / 4096, RGBAFormat, FloatType);
+        sampler.value = texture;
+      } else texture.image.data = packed.data;
+      texture.needsUpdate = true; count.value = packed.count; direct.value = packed.direct;
       mesh.updateVersion();
       return true;
     },
-    setBound(next: boolean) {
+    setBound(next: boolean, elastic = false) {
+      if (dynamicSource !== elastic) {
+        dynamicSource = elastic;
+        metadata = metadataReady = undefined;
+        previous = prepared = undefined;
+      }
       if (next === bound) return;
       bound = next;
       mesh.covObjectModifiers = mesh.covObjectModifiers?.filter(candidate => candidate !== modifier);
@@ -150,6 +262,9 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
     },
     dispose() {
       mesh.covObjectModifiers = mesh.covObjectModifiers?.filter(candidate => candidate !== modifier);
+      disposed = true;
+      current = previous = prepared = undefined;
+      metadata = metadataReady = undefined;
       texture.dispose(); mesh.updateGenerator();
     },
   };

@@ -2,7 +2,7 @@ import { NONLINEAR_SPLAT_DEFORMERS } from "./splat-nonlinear.ts";
 import { CAGE_SPLAT_DEFORMERS } from "./splat-cage-deformers.ts";
 import { Box3, Euler, MathUtils, Matrix3, Matrix4, Quaternion, Vector3 } from "three";
 import type { SceneDocument, SplatShapeNode, Vec3 } from "./scene-document.ts";
-import { componentTransformLookup, type SplatComponentTransforms } from "./splat-component-transforms.ts";
+import { type SplatComponentTransforms } from "./splat-component-transforms.ts";
 import { maskValue, type SplatScalarMask } from "./splat-masks.ts";
 
 export type SplatDeformerWeight = { index: number; weight: number };
@@ -244,78 +244,107 @@ export function withSplatDeformerWeights(entry: SplatDeformer, indices: ArrayLik
   return { ...entry, weights: [...weights].sort(([a], [b]) => a - b).map(([index, weight]) => ({ index, weight })) };
 }
 
-/** Collapse a local deformation chain to one affine per affected original.
- * For each source center x, A(x) = f(x), dA/dx = df/dx. The same Float32
- * coefficients feed both the Spark covariance modifier and the CPU picker. */
-export function evaluateSplatDeformers(
-  stack: readonly SplatDeformer[],
-  masks: readonly SplatScalarMask[],
-  component: SplatComponentTransforms | undefined,
-  frame: number,
-  readCenter: (index: number, target: Vector3) => number | void,
-): SplatComponentTransforms | undefined {
+// Immutable memberships are reused across timeline samples and parameter previews.
+const membershipMaps = new WeakMap<readonly SplatDeformerWeight[], Map<number, number>>();
+function membership(rows: readonly SplatDeformerWeight[] | undefined) {
+  if (!rows) return;
+  let cached = membershipMaps.get(rows);
+  if (!cached) {
+    cached = new Map(rows.map(row => [row.index, row.weight]));
+    membershipMaps.set(rows, cached);
+  }
+  return cached;
+}
+
+type ReadCenter = (index: number, target: Vector3) => number | void;
+
+/** Ordered source traversal shared by archive preflight, viewport and CPU queries.
+ * A job owns its scratch values so a pending frame can never edit the displayed pose. */
+export function prepareSplatDeformerEvaluation(stack: readonly SplatDeformer[], masks: readonly SplatScalarMask[],
+  component: SplatComponentTransforms | undefined, frame: number, readCenter: ReadCenter,
+  sourceCount: number, morphAt?: (index: number) => Matrix4 | undefined) {
   const layers = stack.map(entry => {
     const sampled = sampleSplatDeformer(entry, frame);
     return {
       apply: getSplatDeformerDefinition(sampled.kind)!.prepare(sampled.params),
-      envelope: sampled.envelope,
-      weights: sampled.weights && new Map(sampled.weights.map(({ index, weight }) => [index, weight])),
+      envelope: sampled.envelope, weights: membership(sampled.weights),
       mask: masks.find(mask => mask.id === sampled.maskId),
     };
   }).filter(layer => layer.envelope !== 0);
-  if (!layers.length) return component;
-  const sourceCount = stack[0].sourceCount, componentAt = componentTransformLookup(component);
-  const source = new Vector3(), input = new Vector3(), output = new Vector3(), linear = new Matrix3(), jacobian = new Matrix3(), matrix = new Matrix4();
-  const records: SplatComponentTransforms["records"][number][] = [];
-  // Whole-object layers need every original. Sparse layers can visit just their
-  // union and any component records that must survive the stack unchanged.
   const visits = layers.reduce((sum, layer) => sum + (layer.weights?.size ?? sourceCount), component?.records.length ?? 0);
   let indices: number[] | undefined;
-  if (visits < sourceCount / 2) {
+  if (!morphAt && visits < sourceCount / 2) {
     const members = new Set(component?.records.map(record => record.index));
-    for (const layer of layers) for (const index of layer.weights!.keys()) members.add(index);
+    for (const layer of layers) for (const id of layer.weights!.keys()) members.add(id);
     indices = [...members].sort((a, b) => a - b);
   }
-  let changed = false;
-  for (let offset = 0; offset < (indices?.length ?? sourceCount); offset++) {
-    const index = indices?.[offset] ?? offset;
-    const prior = componentAt(index);
-    let initialized = false, affected = false, sourceScale = 0;
-    for (const layer of layers) {
-      const weight = layer.weights ? layer.weights.get(index) ?? 0 : 1;
-      const influence = layer.envelope * weight * (layer.mask && weight ? maskValue(layer.mask, index) : 1);
-      if (!influence) continue;
-      if (!initialized) {
-        sourceScale = readCenter(index, source) ?? 0;
-        input.copy(source);
-        linear.identity();
-        if (prior) { input.applyMatrix4(prior); linear.setFromMatrix4(prior); }
-        initialized = true;
+  let cursor = 0, changed = false;
+  const source = new Vector3(), input = new Vector3(), output = new Vector3(), linear = new Matrix3(), jacobian = new Matrix3();
+  const matrix = new Matrix4(), prior = new Matrix4();
+  return {
+    length: indices?.length ?? sourceCount,
+    get changed() { return changed; },
+    index(offset: number) { return indices?.[offset] ?? offset; },
+    matrix(index: number) {
+      const row = component?.records[cursor];
+      const edit = row?.index === index ? prior.fromArray(component!.records[cursor++].matrix) : undefined;
+      const morph = morphAt?.(index);
+      const base = morph && edit ? edit.multiply(morph) : morph ?? edit;
+      let initialized = false, affected = !!morph;
+      let sourceScale = 0;
+      for (const layer of layers) {
+        const weight = layer.weights ? layer.weights.get(index) ?? 0 : 1;
+        const influence = layer.envelope * weight * (layer.mask && weight ? maskValue(layer.mask, index) : 1);
+        if (!influence) continue;
+        if (!initialized) {
+          sourceScale = readCenter(index, source) ?? 0;
+          input.copy(source);
+          if (base) { input.applyMatrix4(base); linear.setFromMatrix4(base); }
+          else linear.identity();
+          initialized = true;
+        }
+        layer.apply(input, output, jacobian, influence);
+        if (output.equals(input) && jacobian.equals(IDENTITY_LINEAR)) continue;
+        affected = true;
+        input.copy(output);
+        linear.premultiply(jacobian);
       }
-      layer.apply(input, output, jacobian, influence);
-      if (output.equals(input) && jacobian.equals(IDENTITY_LINEAR)) continue;
-      affected = true;
-      input.copy(output);
-      linear.premultiply(jacobian);
-    }
-    if (affected) {
-      output.copy(source).applyMatrix3(linear);
-      matrix.setFromMatrix3(linear).setPosition(input.sub(output));
-      const encoded = matrix.elements.map(Math.fround);
-      linear.set(encoded[0], encoded[4], encoded[8], encoded[1], encoded[5], encoded[9], encoded[2], encoded[6], encoded[10]);
-      const e = linear.elements;
-      const norm = Math.max(Math.hypot(e[0], e[1], e[2]), Math.hypot(e[3], e[4], e[5]), Math.hypot(e[6], e[7], e[8]));
-      if (encoded.some(value => !Number.isFinite(value) || Math.abs(value) > 1e8) ||
-        !Number.isFinite(sourceScale) || norm * sourceScale > 1e17 ||
-        Math.abs(linear.determinant()) <= Math.max(1e-24, norm ** 3 * 1e-15))
-        throw Error("Splat deformation would produce a collapsed or out-of-range Gaussian.");
+      if (!affected) return edit;
       changed = true;
-      if (!matrix.equals(IDENTITY_AFFINE)) records.push({ index, matrix: encoded });
-    } else if (prior) {
-      records.push({ index, matrix: prior.elements });
-    }
-  }
-  return !changed ? component : records.length ? { version: 1, sourceCount, records } : undefined;
+      if (initialized) {
+        output.copy(source).applyMatrix3(linear);
+        matrix.setFromMatrix3(linear).setPosition(input.sub(output));
+      } else {
+        matrix.copy(base!);
+        sourceScale = readCenter(index, source) ?? 0;
+      }
+      // Validate the exact Float32 coefficients consumed by Spark and the picker.
+      const e = matrix.elements;
+      for (let i = 0; i < 16; i++) {
+        e[i] = Math.fround(e[i]);
+        if (!(Math.abs(e[i]) <= 1e8)) throw Error(INVALID_GAUSSIAN);
+      }
+      const normSq = Math.max(e[0]*e[0]+e[1]*e[1]+e[2]*e[2], e[4]*e[4]+e[5]*e[5]+e[6]*e[6], e[8]*e[8]+e[9]*e[9]+e[10]*e[10]);
+      const norm = Math.sqrt(normSq);
+      if (!Number.isFinite(sourceScale) || norm * sourceScale > 1e17 ||
+        Math.abs(linear.setFromMatrix4(matrix).determinant()) <= Math.max(1e-24, normSq * norm * 1e-15)) throw Error(INVALID_GAUSSIAN);
+      return matrix.equals(IDENTITY_AFFINE) ? undefined : matrix;
+    },
+  };
 }
+
+export function evaluateSplatDeformers(stack: readonly SplatDeformer[], masks: readonly SplatScalarMask[],
+  component: SplatComponentTransforms | undefined, frame: number, readCenter: ReadCenter): SplatComponentTransforms | undefined {
+  if (!stack.length) return component;
+  const sourceCount = stack[0].sourceCount;
+  const job = prepareSplatDeformerEvaluation(stack, masks, component, frame, readCenter, sourceCount);
+  const records: SplatComponentTransforms["records"][number][] = [];
+  for (let offset = 0; offset < job.length; offset++) {
+    const index = job.index(offset), matrix = job.matrix(index);
+    if (matrix) records.push({ index, matrix: matrix.toArray() });
+  }
+  return !job.changed ? component : records.length ? { version: 1, sourceCount, records } : undefined;
+}
+const INVALID_GAUSSIAN = "Splat deformation would produce a collapsed or out-of-range Gaussian.";
 const IDENTITY_AFFINE = new Matrix4();
 const IDENTITY_LINEAR = new Matrix3();
