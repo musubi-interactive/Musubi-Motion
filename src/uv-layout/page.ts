@@ -1,5 +1,6 @@
 import "./style.css";
-import type { UVLayout } from "./obj.ts";
+import { diagnosticsControls, type Highlight } from "./diagnostics-controls.ts";
+import type { MappedFace, UVLayout } from "./obj.ts";
 import type { ParseResult } from "./parse-worker.ts";
 import { drawTile, firstMappedTile, tileLabel, tileSegments, type Segment, type Tile } from "./tile.ts";
 
@@ -29,10 +30,70 @@ let tile: Tile = { u: 0, v: 0 };
 let segments: Segment[] = [];
 let mappedTile: Tile | undefined;
 let exporting = false;
+let highlight: Highlight | undefined;
+let highlightPaths: Path2D[] = [];
+const diagnostics = diagnosticsControls({
+  tile: () => tile,
+  selected: () => [...selected].sort((a, b) => a - b),
+  showHighlight(value, target) {
+    highlight = value;
+    if (target && (target.u !== tile.u || target.v !== tile.v)) {
+      tile = target;
+      tileU.value = String(tile.u);
+      tileV.value = String(tile.v);
+      refreshPreview();
+    } else {
+      updateHighlight();
+      redraw();
+    }
+    if (value) canvas.scrollIntoView({ block: "nearest" });
+  },
+});
+
+function updateHighlight() {
+  if (!layout || !highlight) {
+    highlightPaths = [];
+    return;
+  }
+  function pathFor(faces: MappedFace[]) {
+    const path = new Path2D();
+    for (const { uvs } of faces) {
+      for (const [i, uv] of uvs.entries()) {
+        const [u, v] = layout!.coordinates[uv];
+        const x = (u - tile.u) * canvas.width, y = (tile.v + 1 - v) * canvas.height;
+        if (i === 0) path.moveTo(x, y);
+        else path.lineTo(x, y);
+      }
+      path.closePath();
+    }
+    return path;
+  }
+  highlightPaths = [pathFor(highlight.faces)];
+  if (highlight.second) highlightPaths.push(pathFor([highlight.second]));
+}
 
 function redraw() {
   drawTile(canvas, segments, darkTheme.matches ? "#f0f0f0" : "#171717",
     { checker: checker.checked, dark: darkTheme.matches });
+  if (!highlightPaths.length) return;
+  const context = canvas.getContext("2d")!;
+  const scale = canvas.width / Math.max(1, canvas.clientWidth);
+  const foreground = darkTheme.matches ? "#fff" : "#0a0a0a";
+  const backdrop = darkTheme.matches ? "#141414" : "#fff";
+  context.save();
+  context.lineJoin = "round";
+  highlightPaths.forEach((path, index) => {
+    context.fillStyle = darkTheme.matches ? "#ffffff26" : "#00000026";
+    context.fill(path, "evenodd");
+    context.setLineDash(index ? [5 * scale, 4 * scale] : []);
+    context.strokeStyle = index ? foreground : backdrop;
+    context.lineWidth = (index ? 3 : 5) * scale;
+    context.stroke(path);
+    context.strokeStyle = index ? backdrop : foreground;
+    context.lineWidth = (index ? 1.3 : 2.5) * scale;
+    context.stroke(path);
+  });
+  context.restore();
 }
 
 function refreshPreview() {
@@ -62,6 +123,7 @@ function refreshPreview() {
       + `${outside.toLocaleString()} outside tile 0, 0.`;
   }
   download.disabled = exporting || segments.length === 0;
+  updateHighlight();
   redraw();
 }
 
@@ -81,6 +143,7 @@ function renderObjects(layout: UVLayout) {
     checkbox.addEventListener("change", () => {
       if (checkbox.checked) selected.add(index);
       else selected.delete(index);
+      diagnostics.selectionChanged();
       refreshPreview();
     });
     row.append(checkbox, name, count);
@@ -95,6 +158,7 @@ function selectAll(checked: boolean) {
     checkbox.checked = checked;
     if (checked) selected.add(index);
   });
+  diagnostics.selectionChanged();
   refreshPreview();
 }
 
@@ -141,6 +205,7 @@ function loadFile(file: File) {
     selected.clear();
     for (const index of layout.objects.keys()) selected.add(index);
     renderObjects(layout);
+    diagnostics.setSource({ layout, name: sourceName, sha256: result.sha256 });
     refreshPreview();
   });
   try { request.postMessage(file); }
@@ -195,11 +260,13 @@ firstTile.addEventListener("click", () => {
   tile = mappedTile;
   tileU.value = String(tile.u);
   tileV.value = String(tile.v);
+  diagnostics.tileChanged();
   refreshPreview();
 });
 element<HTMLFormElement>("tile-form").addEventListener("submit", event => {
   event.preventDefault();
   tile = { u: tileU.valueAsNumber, v: tileV.valueAsNumber };
+  diagnostics.tileChanged();
   refreshPreview();
 });
 edgeMode.addEventListener("change", refreshPreview);
