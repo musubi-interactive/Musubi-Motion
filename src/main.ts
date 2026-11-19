@@ -1138,7 +1138,7 @@ async function start() {
         transformChanged = transforms.update(transformValue, deformerPanel?.deformersForShape(shape) ?? shape.deformers, shape.scalarMasks, frame, splatMorphPose(shape, evaluated.get(shape.parentId)?.morphWeights));
       } catch (error) {
         notice.textContent = (error as Error).message;
-        transformChanged = transforms.update(transformValue);
+        // Keep the last complete geometry when a candidate pose fails validation.
       }
       transforms.setBound(!!shape.binding, !!shape.elasticity);
       if (object.edits?.value !== shape.componentEdits) {

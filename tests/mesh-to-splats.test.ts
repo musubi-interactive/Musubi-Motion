@@ -1,3 +1,7 @@
+import { readFile } from "node:fs/promises";
+import { decodeProject } from "../src/project-archive.ts";
+import { evaluateChannels, evaluateSceneAnimation, validateAnimation } from "../src/animation.ts";
+import { createSplatTransformRuntime } from "../src/splat-transform-runtime.ts";
 import { describe, expect, it, vi } from "vitest";
 import { Color, Euler, Matrix4, Object3D, Quaternion, Vector3 } from "three";
 import { ExtSplats, type SplatMesh } from "@sparkjsdev/spark";
@@ -60,10 +64,20 @@ describe("mesh surface conversion and imported skin alignment", () => {
     expect(() => validateSplatMorphs(made, made.bytes.length/32)).not.toThrow();
     const weights = [.35,.8], affine = prepareSplatMorphPose({surface:surface!, weights})!(0)!;
     const source = sourceFromBytes(made.bytes);
+    const mesh = Object.assign(new Object3D(), { extSplats: source, numSplats: source.numSplats, opacity: 1,
+      minRaycastOpacity: .01, updateGenerator: vi.fn(), updateVersion: vi.fn() }) as unknown as SplatMesh;
+    const transforms = createSplatTransformRuntime(mesh);
+    const skin = createBinding(mesh, binding!, undefined, [], transforms);
+    const turn = new Matrix4().makeRotationY(.43).setPosition(1,2,-1);
+    const restInverse = new Matrix4().fromArray(binding!.restMatrices[0]).invert();
+    transforms.update(undefined, undefined, undefined, 10, { surface: surface!, weights });
+    skin.update(() => turn);
     for (const i of [0,20,source.numSplats-1]) {
       const p = source.getSplat(i).center, b=(p.x-5)/2,c=(p.y+2)/3;
       const expected = p.clone().add(new Vector3(0,b*.35-c*.48,c*.24));
       expect(p.clone().applyMatrix4(affine).distanceTo(expected)).toBeLessThan(1e-6);
+      const picked = new Vector3().fromArray(skin.getComponentPositions([i]));
+      expect(picked.distanceTo(expected.applyMatrix4(restInverse).applyMatrix4(turn))).toBeLessThan(3e-6);
     }
     expect(new Vector3(2,0,0).transformDirection(affine).distanceTo(new Vector3(2,.35,0).normalize())).toBeLessThan(1e-8);
     expect(prepareSplatMorphPose({surface:surface!,weights:[0,0]})).toBeUndefined();
@@ -71,7 +85,20 @@ describe("mesh surface conversion and imported skin alignment", () => {
     validateSplatMorphs({morphSurface:subset, morphTargets}, 3);
     expect(prepareSplatMorphPose({surface:subset,weights})!(2)!.elements).toEqual(affine.elements);
     expect(() => validateSplatMorphs(made, 1)).toThrow(/source count/);
+    skin.dispose(); transforms.dispose();
     source.dispose();
+  });
+  it("checks authored facial keys and bounds the combined pose at fractional frames", async () => {
+    const { scene } = await decodeProject(new Uint8Array(await readFile("examples/character-remix.msb")));
+    const animation = scene.animation!;
+    const smile = animation.tracks.find(t => t.targetId === "courier" && t.channel === "morph.0")!;
+    const keys = smile.keys.map(k => ({ ...k, value: 1_000_000, tangentMode: "fixed" as const, outSlope: 20000, inSlope: -20000 }));
+    const document = { ...scene, animation: { ...animation, tracks: animation.tracks.map(t => t === smile ? { ...t, keys } : t) } };
+    validateAnimation(document.animation, document);
+    expect(evaluateChannels(document, "courier", 7.25).morphWeights![0]).toBe(1_000_000);
+    expect(evaluateSceneAnimation(document, 7.25).get("courier")?.morphWeights).toEqual(evaluateChannels(document, "courier", 7.25).morphWeights);
+    keys[0].value++;
+    expect(() => validateAnimation(document.animation, document)).toThrow(/blend-shape keys/);
   });
   it("interpolates weights at sampled rest positions and preserves full normalized rows", () => {
     const shape=fixture(true), {bytes,binding}=meshToSplatData(shape,defaultCubeSplatSettings,256), source=sourceFromBytes(bytes);

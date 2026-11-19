@@ -13,4 +13,6 @@ A converted shape stores only the mesh vertices and triangles that supplied visi
 
 The order is facial morphs, authored component transforms, ordered splat deformers, then skinning. Picking and drawing consume the same transform. The conversion supports up to 100,000 samples per part, 128 named blend shapes and one million nonzero vertex-target entries. Four bone weights per splat approximate triangles with mixed skin influences. A converted object is independent of later edits to the source geometry. A live surface binding for an existing captured scan is a separate workflow.
 
+To edit control points together, Shift-click points or enter their numbers in the deformer panel. A lattice also offers rows along an axis and planes normal to an axis. Rebinding with identical bounds preserves compatible offsets and animation exactly. When the new grid cannot represent the motion, the editor keeps the existing bind. Choose **Reset point edits and keys** only when starting a fresh bind.
+
 Regenerate the study with `node scripts/create-character-remix.mjs`.

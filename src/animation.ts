@@ -1,3 +1,4 @@
+import { SPLAT_MORPH_WEIGHT_LIMIT } from "./splat-morph.ts";
 import { applyDeformerTracks, deformerTrackRows } from "./splat-deformer-tracks.ts";
 import { assertSplatDeformerUndoFits, trimSplatDeformerHistory } from "./splat-deformer-history.ts";
 import { isDiscreteAttribute, validDiscreteValue } from "./custom-attribute-types.ts";
@@ -122,6 +123,8 @@ export function validateAnimation(value: unknown, doc: SceneDocument): asserts v
     if (channels.has(layeredChannel)) throw Error("Duplicate animated channel in a layer.");
     if (driven.has(channelKey)) throw Error("A channel cannot have both time keys and driven keys.");
     validateCurveKeys(track.keys);
+    const splatMorph = (track.channel as string).startsWith("morph.") && morphDefaults(doc, track.targetId)?.type === "splatShape";
+    if (splatMorph && track.keys.some(key => Math.abs(key.value) > SPLAT_MORPH_WEIGHT_LIMIT)) throw Error("Splat blend-shape keys must be within ±1,000,000.");
     const typedAttribute = customAttribute(doc, track.targetId, track.channel as string);
     if (isDiscreteAttribute(typedAttribute) && track.keys.some(key => key.interpolation !== "step" || !validDiscreteValue(typedAttribute!, key.value))) throw Error("Boolean and Enum time curves require Step interpolation and valid choices.");
     totalKeys += track.keys.length;
@@ -452,7 +455,10 @@ function sampledChannels(doc: SceneDocument, id: string, frame: number, weights:
   for (const channel of animationIndex(doc.animation).targets.get(id)?.channels.keys() ?? []) {
     if (channel === "ik.blend") continue;
     const value = channelStack(doc, id, channel, frame, readChannel(pose, channel), false, weights).offset;
-    applyChannel(pose, channel, isCustomChannel(channel) ? boundedAttributeValue(customAttribute(doc, id, channel)!, value) : effectiveValue(channel, value));
+    const effective = channel.startsWith("morph.") && morphDefaults(doc, id)?.type === "splatShape"
+      ? Math.min(SPLAT_MORPH_WEIGHT_LIMIT, Math.max(-SPLAT_MORPH_WEIGHT_LIMIT, value))
+      : isCustomChannel(channel) ? boundedAttributeValue(customAttribute(doc, id, channel)!, value) : effectiveValue(channel, value);
+    applyChannel(pose, channel, effective);
   }
   return pose;
 }
@@ -461,20 +467,12 @@ function sampledChannels(doc: SceneDocument, id: string, frame: number, weights:
 export function evaluateSceneAnimation(doc: SceneDocument, frame: number): Map<string, AnimationPose> {
   if (!Number.isFinite(frame)) throw Error("Animation frame must be finite.");
   const poses = new Map<string, AnimationPose>(), weights = sampleLayerWeights(animationIndex(doc.animation), frame);
-  for (const node of Object.values(doc.nodes)) if (node.type === "transform") {
-    poses.set(node.id, baseChannels(doc, node.id));
-  }
-  for (const joint of doc.joints ?? []) {
-    poses.set(joint.id, baseChannels(doc, joint.id));
-  }
-  for (const handle of doc.ikHandles ?? []) if (attributesFor(doc, handle.id).length) poses.set(handle.id, baseChannels(doc, handle.id));
-  for (const [id, pose] of poses) {
-    for (const channel of animationIndex(doc.animation).targets.get(id)?.channels.keys() ?? []) {
-      if (channel === "ik.blend") continue;
-      const value = channelStack(doc, id, channel, frame, readChannel(pose, channel), false, weights).offset;
-      applyChannel(pose, channel, isCustomChannel(channel) ? boundedAttributeValue(customAttribute(doc, id, channel)!, value) : effectiveValue(channel, value));
-    }
-  }
+  for (const node of Object.values(doc.nodes)) if (node.type === "transform")
+    poses.set(node.id, sampledChannels(doc, node.id, frame, weights));
+  for (const joint of doc.joints ?? [])
+    poses.set(joint.id, sampledChannels(doc, joint.id, frame, weights));
+  for (const handle of doc.ikHandles ?? []) if (attributesFor(doc, handle.id).length)
+    poses.set(handle.id, sampledChannels(doc, handle.id, frame, weights));
   return poses;
 }
 

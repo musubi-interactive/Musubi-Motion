@@ -1,5 +1,5 @@
 import { Matrix4, Vector3 } from "three";
-import type { MeshShapeNode, Vec3 } from "./scene-document.ts";
+import type { MeshShapeNode, SplatShapeNode, Vec3 } from "./scene-document.ts";
 
 type MorphTarget = { name: string; weight: number };
 type VertexDelta = [vertex: number, dx: number, dy: number, dz: number];
@@ -12,6 +12,7 @@ export type SplatMorphSurface = {
 };
 export type SplatMorphPose = { surface: SplatMorphSurface; weights: readonly number[] };
 type MorphShape = { morphTargets?: MorphTarget[]; morphSurface?: SplatMorphSurface };
+export const SPLAT_MORPH_WEIGHT_LIMIT = 1_000_000;
 const deltaLimit = 1_000_000;
 const bounded = (v: number) => Number.isFinite(v) && Math.abs(v) <= 1e6;
 export function splatMorphPose(shape: MorphShape, weights?: readonly number[]): SplatMorphPose | undefined {
@@ -50,13 +51,16 @@ export function buildSplatMorphSurface(shape: MeshShapeNode, runs: { end: number
   return { sourceCount: faces.at(-1)![0], vertices, faces, deltas };
 }
 
-export function validateSplatMorphs(shape: MorphShape, count?: number) {
+export function validateSplatMorphs(shape: MorphShape & Partial<Pick<SplatShapeNode, "componentEdits" | "componentTransforms" | "binding" | "deformers" | "selectionSets" | "scalarMasks" | "appearance" | "attributePaint">>, count?: number) {
   const { morphTargets: targets, morphSurface: s } = shape;
   if (targets === undefined && s === undefined) return;
   const fail = () => { throw Error("Invalid splat blend-shape surface or original source count."); };
   if (!s || !Array.isArray(targets) || !targets.length || targets.length > 128 ||
-      targets.some(t => !t || typeof t.name !== "string" || !t.name.trim() || !bounded(t.weight))) return fail();
-  if (!Number.isInteger(s.sourceCount) || s.sourceCount < 1 || s.sourceCount > 100000 || (count !== undefined && count !== s.sourceCount) ||
+      targets.some(t => !t || typeof t.name !== "string" || !t.name.trim() || !Number.isFinite(t.weight) || Math.abs(t.weight) > SPLAT_MORPH_WEIGHT_LIMIT)) return fail();
+  const authoredCounts = [count, shape.componentEdits?.sourceCount, shape.componentTransforms?.sourceCount, shape.binding?.weights?.count,
+    shape.deformers?.[0]?.sourceCount, shape.selectionSets?.[0]?.sourceCount, shape.scalarMasks?.[0]?.sourceCount,
+    shape.appearance?.sourceCount, shape.attributePaint?.sourceCount];
+  if (!Number.isInteger(s.sourceCount) || s.sourceCount < 1 || s.sourceCount > 100000 || authoredCounts.some(value => value !== undefined && value !== s.sourceCount) ||
       !Array.isArray(s.vertices) || s.vertices.length < 3 || s.vertices.length > 3 * s.sourceCount ||
       !Array.isArray(s.faces) || !s.faces.length || s.faces.length > s.sourceCount ||
       !Array.isArray(s.deltas) || s.deltas.length !== targets.length) return fail();
@@ -140,7 +144,7 @@ function triangleRest(surface: SplatMorphSurface, cache: SurfaceCache, index: nu
 
 export function prepareSplatMorphPose(pose: SplatMorphPose) {
   const { surface, weights } = pose;
-  if (weights.length !== surface.deltas.length || !weights.every(bounded)) throw Error("Invalid splat blend-shape weights.");
+  if (weights.length !== surface.deltas.length || !weights.every(w => Number.isFinite(w) && Math.abs(w) <= SPLAT_MORPH_WEIGHT_LIMIT)) throw Error("Invalid splat blend-shape weights.");
   if (!weights.some((w,i) => w !== 0 && surface.deltas[i].length)) return;
   const cache = bindCaches.get(surface) ?? { faces: new Map(), vertices: new Map() } as SurfaceCache;
   bindCaches.set(surface, cache);
