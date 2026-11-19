@@ -16,3 +16,5 @@ The order is facial morphs, authored component transforms, ordered splat deforme
 To edit control points together, Shift-click points or enter their numbers in the deformer panel. A lattice also offers rows along an axis and planes normal to an axis. Rebinding with identical bounds preserves compatible offsets and animation exactly. When the new grid cannot represent the motion, the editor keeps the existing bind. Choose **Reset point edits and keys** only when starting a fresh bind.
 
 Regenerate the study with `node scripts/create-character-remix.mjs`.
+
+The playback benchmark runs with `node scripts/benchmark-splat-deformers.mjs`. It measures CPU evaluation and packing on 80,000 originals animated through bend, twist and squash. Browser navigation and rendering add latency beyond this measurement.
