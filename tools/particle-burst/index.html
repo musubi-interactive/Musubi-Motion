@@ -15,6 +15,7 @@
       <button id="open" type="button">Open Recipe</button>
       <input id="recipe-file" type="file" accept=".json,application/json" hidden>
       <button id="save" type="button">Save Recipe</button>
+      <button id="example" type="button">Load Example</button>
       <button id="undo" type="button" title="Undo (Ctrl/Cmd+Z)">Undo</button>
       <button id="redo" type="button" title="Redo (Ctrl/Cmd+Shift+Z)">Redo</button>
       <button id="theme" type="button">Theme: System</button>
@@ -27,8 +28,8 @@
         <button id="play" type="button">Play</button>
         <button id="frame-view" type="button" title="Fit the visible particles in the preview">Frame Burst</button>
         <label class="timeline-label" for="timeline">Frame</label>
-        <input id="timeline" type="range" min="0" max="60" value="24" step="1" aria-label="Timeline frame">
-        <input id="frame" type="number" min="0" max="60" value="24" step="1" aria-label="Frame number">
+        <input id="timeline" type="range" min="0" max="60" value="10" step="1" aria-label="Timeline frame">
+        <input id="frame" type="number" min="0" max="60" value="10" step="any" aria-label="Frame number">
       </div>
       <div class="output">
         <span id="count"></span>
@@ -36,7 +37,24 @@
       </div>
       <p id="status" role="status"></p>
     </section>
-    <aside id="settings" class="settings" aria-label="Burst settings"></aside>
+    <aside id="settings" class="settings" aria-label="Burst settings">
+      <fieldset class="stages">
+        <legend>Stages</legend>
+        <select id="stage-select" aria-label="Selected stage"></select>
+        <div class="stage-actions" role="group" aria-label="Stage actions">
+          <button id="stage-add" type="button" aria-label="Add stage">Add</button>
+          <button id="stage-duplicate" type="button" aria-label="Duplicate stage">Duplicate</button>
+          <button id="stage-remove" type="button" aria-label="Remove stage">Remove</button>
+          <button id="stage-up" type="button" aria-label="Move stage up">Move Up</button>
+          <button id="stage-down" type="button" aria-label="Move stage down">Move Down</button>
+        </div>
+        <label class="stage-name">Name <input id="stage-name" type="text"></label>
+        <div id="stage-time"></div>
+        <label class="stage-enable"><input id="stage-enabled" type="checkbox"> Enabled for Preview and Bake</label>
+        <button id="stage-solo" type="button" aria-pressed="false" title="Show the selected stage only. Baking still uses all enabled stages.">Solo Preview</button>
+        <p id="stage-budget" class="stage-budget"></p>
+      </fieldset>
+    </aside>
   </main>
   <script type="module" src="../../src/particle-burst/app.ts"></script>
 </body>

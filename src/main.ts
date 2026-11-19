@@ -124,7 +124,7 @@ import { createSkinWeightPaintPanel, type SkinWeightBrushSettings } from "./skin
 import { createSkinWeightPaintTool } from "./skin-weight-paint-tool.ts";
 import { createMeshRenderable } from "./mesh-renderer.ts";
 import { createMeshComponentPreview, type MeshComponentMode } from "./mesh-component-preview.ts";
-import { createModelingPanel, type BevelPreview } from "./modeling-panel.ts";
+import { createModelingPanel, type TopologyPreview } from "./modeling-panel.ts";
 import { pickMeshComponents } from "./mesh-component-selection.ts";
 import { captureMeshComponentTransform } from "./mesh-component-transform.ts";
 import { setMeshVertexPositions } from "./mesh-modeling.ts";
@@ -358,7 +358,7 @@ async function start() {
   let particlePoseDoc: SceneDocument | undefined, particlePoseSampler: ReturnType<typeof createParticlePoseSampler> | undefined;
   let meshComponentRequest: { shapeId: string; mode: MeshComponentMode } | undefined;
   let meshComponentIds: string[] = [];
-  let meshBevelPreview: (BevelPreview & { object: Extract<RuntimeObject, { kind: "mesh" }> }) | undefined;
+  let meshTopologyPreview: (TopologyPreview & { object: Extract<RuntimeObject, { kind: "mesh" }> }) | undefined;
   const meshComponentProxy = new THREE.Object3D(); world.add(meshComponentProxy);
   let meshDrag: { document: SceneDocument; shape: MeshShapeNode; object: Extract<RuntimeObject, { kind: "mesh" }>;
     snapshot: ReturnType<typeof captureMeshComponentTransform>; startInverse: THREE.Matrix4; previewShape?: MeshShapeNode } | undefined;
@@ -367,9 +367,9 @@ async function start() {
     const shape = meshComponentRequest && store.getState().document.nodes[meshComponentRequest.shapeId];
     const object = shape?.type === "meshShape" ? runtime.get(shape.parentId) : undefined;
     if (!meshComponentRequest || shape?.type !== "meshShape" || object?.kind !== "mesh") { meshComponentPreview.clear(); return; }
-    const bevel = meshBevelPreview?.object === object ? meshBevelPreview : undefined;
-    meshComponentPreview.update(bevel?.shape ?? meshDrag?.previewShape ?? shape,
-      object.mesh, object.polygon.triangleFaceIds, meshComponentRequest.mode, bevel?.edgeIds ?? meshComponentIds);
+    const preview = meshTopologyPreview?.object === object ? meshTopologyPreview : undefined;
+    meshComponentPreview.update(preview?.shape ?? meshDrag?.previewShape ?? shape,
+      object.mesh, object.polygon.triangleFaceIds, meshComponentRequest.mode, preview?.edgeIds ?? meshComponentIds);
     meshComponentPreview.setVisible(gizmosVisible && !playing && !loading);
   }
   let weightPreview: { shapeId: string; indices: number[]; jointId: string } | undefined;
@@ -1180,7 +1180,7 @@ async function start() {
     menu: element<WaDropdown>("display-menu"), renderer: webgl, world, spark, objects: () => runtime.values(),
     getFrame: () => ({
       document: store.getState().document, sceneName, frame: getFrame(), time, view: activeView,
-      camera, orbitTarget: controls.target, available: !loading && !playing && !dragId && !meshBevelPreview && !splatPaintTool?.busy && !splatMaskPaintTool?.busy,
+      camera, orbitTarget: controls.target, available: !loading && !playing && !dragId && !meshTopologyPreview && !splatPaintTool?.busy && !splatMaskPaintTool?.busy,
     }),
     report: message => { element("file-status").textContent = message; },
   });
@@ -1247,7 +1247,7 @@ async function start() {
     return selected.size === 1 ? selected.values().next().value : undefined;
   }
   function refreshGizmo() {
-    if (meshBevelPreview) { transform.detach(); transform.enabled = false; transform.getHelper().visible = false; return; }
+    if (meshTopologyPreview) { transform.detach(); transform.enabled = false; transform.getHelper().visible = false; return; }
     if (splatMaskPaintTool?.active || splatPaintTool?.active) { transform.detach(); transform.enabled = false; transform.getHelper().visible = false; return; }
     orientationControl.disabled = !!dragId || loading || playing || !!meshComponentRequest || !!skeleton.selectedIds.size || !!selectedIKId || !singleId();
     if (meshDrag || objectDrag || splatDrag) return;
@@ -1974,20 +1974,20 @@ async function start() {
       if (meshComponentRequest?.shapeId !== shapeId || meshComponentRequest.mode !== mode) return;
       meshComponentIds = [...ids]; updateMeshComponentPreview(); refreshGizmo();
     },
-    onBevelPreview: preview => {
+    onTopologyPreview: preview => {
       if (preview) {
         const source = store.getState().document.nodes[preview.shapeId];
         const object = source?.type === "meshShape" ? runtime.get(source.parentId) : undefined;
         if (object?.kind !== "mesh" || object.shape.id !== preview.shapeId) {
-          if (preview.shape) throw Error("The mesh viewport is unavailable for Bevel.");
+          if (preview.shape) throw Error("The mesh viewport is unavailable for the topology preview.");
           return;
         }
         if (preview.shape) object.polygon.previewTopology(preview.shape);
         else object.polygon.clearPreview();
-        meshBevelPreview = { ...preview, object };
+        meshTopologyPreview = { ...preview, object };
       } else {
-        meshBevelPreview?.object.polygon.clearPreview();
-        meshBevelPreview = undefined;
+        meshTopologyPreview?.object.polygon.clearPreview();
+        meshTopologyPreview = undefined;
       }
       cancelSelection();
       updateMeshComponentPreview();
@@ -2105,7 +2105,7 @@ async function start() {
   function historyAction(redo: boolean) {
     cancelComponentScan();
     if (loading || dragId) return;
-    if (modelingPanel?.cancelBevel(true)) return;
+    if (modelingPanel?.cancelTopologyPreview(true)) return;
     setPlaying(false);
     const history = store.temporal.getState();
     if (redo) history.redo();
@@ -2579,7 +2579,7 @@ async function start() {
   );
   webgl.domElement.addEventListener("pointerdown", (event) => {
     if (
-      meshBevelPreview ||
+      meshTopologyPreview ||
       event.button !== 0 ||
       event.altKey ||
       event.pointerType === "touch" ||
@@ -2817,7 +2817,7 @@ async function start() {
     if (key === "escape" && splatDrag) { event.preventDefault(); abortDrag(); return; }
     if (key === "escape" && splatComponent) { event.preventDefault(); cancelComponentScan(); cancelSelection(); return; }
     if (key === "escape" && meshDrag) { event.preventDefault(); abortDrag(); return; }
-    if (key === "escape" && modelingPanel?.cancelBevel(true)) { event.preventDefault(); return; }
+    if (key === "escape" && modelingPanel?.cancelTopologyPreview(true)) { event.preventDefault(); return; }
     if (key === "escape" && meshComponentRequest) { event.preventDefault(); cancelSelection(); modelingPanel?.stopEditing(); return; }
     if (key === "escape" && paintSettings) { event.preventDefault(); skinPaintPanel?.stopPainting(); return; }
     if (key === "escape" && (componentPickShape || pendingComponentPick !== undefined || gesture?.component)) {
