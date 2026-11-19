@@ -1,3 +1,6 @@
+import { createSplatControlOverlay, splatCageControlLayout } from "./splat-control-overlay.ts";
+import { createSplatCageBindingPanel } from "./splat-cage-binding-panel.ts";
+import { createSplatCageFromGeometry } from "./splat-cage.ts";
 import { keyCustomAttribute, editCustomAttributeValue } from "./custom-attribute-keying.ts";
 import { mountCustomAttributes } from "./custom-attributes-panel.ts";
 import { createSplatAppearancePanel } from "./splat-appearance-panel.ts";
@@ -1247,7 +1250,56 @@ async function start() {
     return selected.size === 1 ? selected.values().next().value : undefined;
   }
   // Keep the proxy in the same object-local space as the authored rest handles.
+  const cageBindingPanel = createSplatCageBindingPanel({
+    rebindLattice(shapeId, id, params) {
+      if (loading || playing || dragId) throw Error("Finish the current edit before rebinding.");
+      deformerPanel?.replaceParams(shapeId, id, params, "Rebind splat lattice");
+    },
+    rebindCage(shapeId, id, meshId) {
+      if (loading || playing || dragId) throw Error("Finish the current edit before rebinding.");
+      const shape = store.getState().document.nodes[shapeId];
+      const target = shape?.type === "splatShape" && runtime.get(shape.parentId);
+      const source = runtime.get(meshId);
+      if (!target || target.kind !== "splat" || source?.kind !== "mesh") throw Error("Choose a loaded polygon mesh.");
+      target.mesh.updateWorldMatrix(true, false);
+      source.mesh.updateWorldMatrix(true, false);
+      const matrix = target.mesh.matrixWorld.clone();
+      if (Math.abs(matrix.determinant()) < 1e-12) throw Error("The splat object needs an invertible world transform.");
+      const params = createSplatCageFromGeometry(source.mesh.geometry, matrix.invert().multiply(source.mesh.matrixWorld));
+      deformerPanel?.replaceParams(shapeId, id, params, "Bind splats to polygon cage");
+    },
+  });
+  function refreshCageBinding() {
+    if (!deformerPanel) return;
+    if (cageBindingPanel.element.parentElement !== deformerPanel.bindingPanelHost)
+      deformerPanel.bindingPanelHost.append(cageBindingPanel.element);
+    const selectedEntry = deformerPanel.selectedEntry();
+    const meshes: { id: string; name: string }[] = [];
+    if (selectedEntry?.entry.kind === "cage") {
+      const nodes = store.getState().document.nodes;
+      for (const [id, source] of runtime) if (source.kind === "mesh" && nodes[id]) meshes.push({ id, name: nodes[id].name });
+    }
+    cageBindingPanel.update(selectedEntry && { shapeId: selectedEntry.shapeId, id: selectedEntry.entry.id,
+      kind: selectedEntry.entry.kind, params: selectedEntry.entry.params, meshes });
+  }
   const deformerProxy = new THREE.Object3D();
+  const deformerOverlay = createSplatControlOverlay(world);
+  let overlayState: { params: unknown; kind: string; index: number; matrix: THREE.Matrix4 } | undefined;
+  function syncDeformerOverlay(handle: ReturnType<typeof currentDeformerHandle>) {
+    if (!handle || !gizmosVisible || loading || playing) {
+      if (overlayState) deformerOverlay.clear();
+      overlayState = undefined;
+      return;
+    }
+    handle.object.mesh.updateWorldMatrix(true, false);
+    const matrix = handle.object.mesh.matrixWorld;
+    if (overlayState?.params === handle.params && overlayState?.kind === handle.node.kind &&
+      overlayState.index === handle.index && overlayState.matrix.equals(matrix)) return;
+    const layout = splatCageControlLayout(handle.node.kind, handle.params);
+    if (layout) deformerOverlay.update(layout, matrix, handle.index);
+    else deformerOverlay.clear();
+    overlayState = { params: handle.params, kind: handle.node.kind, index: handle.index, matrix: matrix.clone() };
+  }
   function currentDeformerHandle() {
     const selection = deformerPanel?.selectedHandle();
     if (!selection || !deformerPanel) return;
@@ -1274,11 +1326,13 @@ async function start() {
     if (splatMaskPaintTool?.active || splatPaintTool?.active) { transform.detach(); transform.enabled = false; transform.getHelper().visible = false; return; }
     orientationControl.disabled = !!dragId || loading || playing || !!meshComponentRequest || !!skeleton.selectedIds.size || !!selectedIKId || !singleId();
     if (meshDrag || objectDrag || splatDrag) return;
-    if (handleDrag) return;
     const handle = currentDeformerHandle();
+    syncDeformerOverlay(handle);
+    if (handleDrag) return;
     if (handle && !playing && !loading && gizmosVisible) {
       const pose = handle.adapter.get(handle.params, handle.index);
-      if (currentMode !== "select") {
+      const modes = typeof handle.adapter.modes === "function" ? handle.adapter.modes(handle.index) : handle.adapter.modes;
+      if (currentMode !== "select" && (!modes || modes.includes(currentMode))) {
         if (deformerProxy.parent !== handle.object.mesh) handle.object.mesh.add(deformerProxy);
         deformerProxy.position.copy(pose.position); deformerProxy.quaternion.copy(pose.rotation); deformerProxy.scale.copy(pose.scale);
         deformerProxy.updateWorldMatrix(true, false);
@@ -2647,6 +2701,12 @@ async function start() {
       transform.dragging
     ) {
       if (gesture?.splat && (event.altKey || event.pointerType === "touch")) { cancelComponentScan(); cancelSelection(); }
+      return;
+    }
+    const handle = currentDeformerHandle();
+    if (handle && gizmosVisible && !playing) {
+      const picked = deformerOverlay.pick(camera, webgl.domElement.getBoundingClientRect(), event.clientX, event.clientY);
+      if (picked !== undefined) deformerPanel?.selectHandle(picked);
       return;
     }
     if (gesture?.splat || (splatComponent && currentMode !== "select")) return;

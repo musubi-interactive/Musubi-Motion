@@ -1,3 +1,4 @@
+import { validateSceneSplatDeformers } from "./splat-deformers.ts";
 import { ExtSplats, SplatMesh, utils } from "@sparkjsdev/spark";
 import { POSE_ANIMATION_CHANNELS, type PoseAnimationChannel } from "./animation.ts";
 import { uniqueName, type SceneDocument, type SplatShapeNode, type TransformNode } from "./scene-document.ts";
@@ -230,7 +231,7 @@ export function addSplatExtraction(doc: SceneDocument, identity: SplatSelectionI
     };
   });
   if (source.deformers?.length) {
-    shape.deformers = source.deformers.flatMap(node => {
+    const deformers = source.deformers.flatMap(node => {
       const weights = node.weights?.flatMap(entry => {
         const index = subset.get(entry.index);
         return index === undefined ? [] : [{ ...entry, index }];
@@ -244,6 +245,7 @@ export function addSplatExtraction(doc: SceneDocument, identity: SplatSelectionI
       if (node.maskId) copy.maskId = maskIds.get(node.maskId);
       return [copy];
     });
+    if (deformers.length) shape.deformers = deformers;
   }
   if (source.appearance) shape.appearance = {
     version: 1, sourceCount: ids.length,
@@ -265,5 +267,6 @@ export function addSplatExtraction(doc: SceneDocument, identity: SplatSelectionI
       ...track, id: crypto.randomUUID(), targetId: id, keys: track.keys.map(key => ({ ...key, id: crypto.randomUUID() })),
     }))],
   };
+  if (shape.deformers) validateSceneSplatDeformers(document);
   return { document, id, shape, assetId };
 }
