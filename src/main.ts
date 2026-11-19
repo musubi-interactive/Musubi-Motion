@@ -7,6 +7,8 @@ import { mountCustomAttributes } from "./custom-attributes-panel.ts";
 import { createSplatAppearancePanel } from "./splat-appearance-panel.ts";
 import { createSplatAppearanceRuntime, decodeSplatAppearanceImages, type SplatAppearanceRuntime } from "./splat-appearance-runtime.ts";
 import { validateSplatAppearance } from "./splat-appearance.ts";
+import { createSplatDeformerPanel } from "./splat-deformer-panel.ts";
+import { getSplatDeformerDefinition, validateShapeDeformers } from "./splat-deformers.ts";
 import { compileGraph, type GraphProgram, type PixelSource } from "./procedural-graph-runtime.ts";
 import { createSplatPaintPanel } from "./splat-paint-panel.ts";
 import { createSplatAttributePaintTool, type SplatPaintContext } from "./splat-attribute-paint-tool.ts";
@@ -341,6 +343,7 @@ async function start() {
   let motionImportPanel: ReturnType<typeof createMotionImportPanel> | undefined;
   let graphPanel: ReturnType<typeof createProceduralGraphPanel> | undefined;
   let appearancePanel: ReturnType<typeof createSplatAppearancePanel> | undefined;
+  let deformerPanel: ReturnType<typeof createSplatDeformerPanel> | undefined;
   const noAppearanceMasks: NonNullable<SplatShapeNode["scalarMasks"]> = [];
   const noAppearancePixels = new Map<string, PixelSource>();
   let appearanceProgram: { graph: NonNullable<SceneDocument["proceduralGraph"]>; assets: SceneDocument["textureAssets"]; plan: GraphProgram } | undefined;
@@ -456,11 +459,13 @@ async function start() {
   function setFrame(frame: number) {
     if (!Number.isFinite(frame) || loading || dragId) return;
     setPlaying(false); clearPoseDraft();
+    deformerPanel?.cancelPreview(false);
     const settings = animationSettings();
     time = Math.max(settings.start, Math.min(settings.end, Math.round(frame))) / settings.fps;
     updateTime();
   }
   function keySelection() {
+    if (deformerPanel?.keyActive()) return;
     if (splatComponent) { notice.textContent = "Return to Object mode before keying objects."; return; }
     if (loading || dragId || timelinePanel?.turntable) return;
     setPlaying(false);
@@ -832,6 +837,7 @@ async function start() {
     splatPanel?.update(context?.shape.name, splatComponentIds.length, context?.activeCount ?? 0, activity, available,
       splatSelectionTool, previewSplatRadius === undefined ? splatBrush : { ...splatBrush, radius: previewSplatRadius },
       { hidden: context?.hidden ?? 0, deleted: context?.deleted ?? 0 }, canDuplicate, duplicating);
+    deformerPanel?.refresh();
   }
   function changeSplatTool(tool: SplatSelectionTool) {
     if (splatSelectionTool === tool) return;
@@ -1056,8 +1062,15 @@ async function start() {
       const transforms = object.transforms ??= createSplatTransformRuntime(object.mesh);
       if (splatTransformPreview && splatTransformPreview.document !== doc) splatTransformPreview = undefined;
       const transformValue = splatTransformPreview?.shapeId === shape.id ? splatTransformPreview.value : shape.componentTransforms;
-      const transformChanged = transforms.value !== transformValue, editChanged = object.edits?.value !== shape.componentEdits;
-      transforms.update(transformValue);
+      const editChanged = object.edits?.value !== shape.componentEdits;
+      const frame = timelinePanel?.turntable ? animationSettings().start : getFrame();
+      let transformChanged = false;
+      try {
+        transformChanged = transforms.update(transformValue, deformerPanel?.deformersForShape(shape) ?? shape.deformers, shape.scalarMasks, frame);
+      } catch (error) {
+        notice.textContent = (error as Error).message;
+        transformChanged = transforms.update(transformValue);
+      }
       transforms.setBound(!!shape.binding);
       if (object.edits?.value !== shape.componentEdits) {
         if (!shape.componentEdits) { object.edits?.mask.dispose(); object.edits = undefined; }
@@ -1075,7 +1088,7 @@ async function start() {
           }
         }
       }
-      if (!shape.binding && (transformChanged || editChanged)) object.transformedBounds = transformValue ? transforms.bounds(index => index < object.count && (!object.edits || object.edits.active(index))) : undefined;
+      if (transformChanged || editChanged) object.transformedBounds = transforms.value ? transforms.bounds(index => index < object.count && (!object.edits || object.edits.active(index))) : undefined;
       if (!shape.binding) {
         applySplatPaintRuntime(shape, object, shape.attributePaint);
         continue;
@@ -1655,6 +1668,7 @@ async function start() {
     modelingPanel?.refresh();
     particlePanel?.refresh();
     appearancePanel?.refresh();
+    deformerPanel?.refresh();
     materialPanel?.refresh();
     motionImportPanel?.refresh();
   }
@@ -1784,6 +1798,7 @@ async function start() {
       if (!retainedAssets.has(id)) assetFiles.delete(id);
   }
   timelinePanel = mountTimeline(store, { getFrame, setFrame, setKey: keySelection, getSelection: animationSelection,
+    deleteDeformerKeys: () => deformerPanel?.deleteKeysAtFrame() ?? false,
     available: () => !loading && !dragId,
     onModeChange() { setPlaying(false); clearPoseDraft(); time = timelinePanel?.turntable ? 0 : animationSettings().start / animationSettings().fps; updateTime(); },
   });
@@ -2109,6 +2124,51 @@ async function start() {
   });
   splatPanel.element.querySelector(".splat-transform-fields")!.before(splatSoftPanel.element);
   workspace.registerPanel("splat-components", "Splat Components", splatPanel.element);
+  deformerPanel = createSplatDeformerPanel(store, {
+    context() {
+      const context = selectedSplatMaskContext();
+      if (!context) return;
+      const { shape, object, identity, selected } = context;
+      return {
+        shape, count: identity.count, componentMode: splatComponent?.shapeId === shape.id, indices: selected,
+        weights: splatComponentWeights,
+        restBounds(indices) {
+          const bounds = new THREE.Box3(), source = object.mesh.extSplats ?? object.mesh.packedSplats;
+          if (!source) return bounds;
+          if (!indices && !object.transforms?.value && !object.edits) return object.bounds.clone();
+          const center = new THREE.Vector3();
+          const expand = (index: number, position: THREE.Vector3) => {
+            if (index >= identity.count || (object.edits && !object.edits.active(index))) return;
+            center.copy(position);
+            const affine = object.transforms?.affine(index);
+            if (affine) center.applyMatrix4(affine);
+            bounds.expandByPoint(center);
+          };
+          if (indices) for (const index of indices) expand(index, source.getSplat(index).center);
+          else source.forEachSplat(expand);
+          return bounds;
+        },
+      };
+    },
+    available: () => !loading && !playing && !dragId && pendingComponentPick === undefined && !extractionRequest &&
+      !splatPaintTool?.active && !splatMaskPaintTool?.busy,
+    frame: () => timelinePanel?.turntable ? animationSettings().start : getFrame(),
+    canKey: () => !timelinePanel?.turntable,
+    autoKey: () => timelinePanel?.autoKey ?? false,
+    preflight(shape) {
+      const object = runtime.get(shape.parentId);
+      if (object?.kind !== "splat" || !object.transforms) throw Error("Load the original splats before editing a deformer.");
+      const frame = timelinePanel?.turntable ? animationSettings().start : getFrame();
+      object.transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame);
+    },
+    onPreview() { updateBindings(); refreshGizmo(); },
+    onHandleChange() { refreshGizmo(); },
+  });
+  workspace.registerPanel("splat-deformers", "Splat Deformers", deformerPanel.element);
+  element("create-splat-cluster").addEventListener("click", () => {
+    element("view-splat-deformers").click();
+    deformerPanel?.create("cluster");
+  });
   splatMaskPanel = createSplatMaskPanel(store, {
     available: () => !loading && !playing && !dragId,
     busy: () => !!splatMaskPaintTool?.busy,
@@ -3031,6 +3091,7 @@ async function start() {
     splatPaintPanel?.stopPainting();
     cancelComponentScan();
     if (value) {
+      deformerPanel?.cancelPreview(false);
       skinPaintPanel?.stopPainting();
       modelingPanel?.stopEditing();
       clearPoseDraft();
@@ -3040,6 +3101,7 @@ async function start() {
     playing = value;
     graphPanel?.refresh();
     appearancePanel?.refresh();
+    deformerPanel?.refresh();
     materialPanel?.refresh();
     motionImportPanel?.refresh();
     updateSplatPreview();
@@ -3116,6 +3178,7 @@ async function start() {
     if (meshComponentRequest) refreshGizmo();
     updateParticles();
     timelinePanel?.refresh();
+    deformerPanel?.refresh();
     const turntable = timelinePanel?.turntable;
     timeline.value = turntable ? time : getFrame();
     graphPanel?.refresh();
@@ -3155,6 +3218,7 @@ async function start() {
     if (value) ikPanel?.cancelPreview();
     loading = value;
     if (value) {
+      deformerPanel?.stopEditing();
       skinPaintPanel?.stopPainting();
       modelingPanel?.stopEditing();
       setPlaying(false);
@@ -3317,14 +3381,23 @@ async function start() {
                 fileBytes: await project.files.get(asset.id)!.arrayBuffer(),
                 fileName: asset.fileName,
               });
+        let transforms: SplatTransformRuntime | undefined;
         try {
           const data = await prepareSplat(mesh);
           if (shape.componentEdits) validateSplatComponentEdits(shape.componentEdits, data.count);
           if (shape.componentTransforms) validateSplatComponentTransforms(shape.componentTransforms, data.count);
+          validateShapeDeformers(shape, data.count);
           validateSplatMaskCollections(shape, data.count);
           validateSplatAppearance(shape, data.count);
           validateSplatAttributePaint(shape, data.count);
           if (shape.binding) validateSkinWeightCount(shape.binding, mesh.numSplats);
+          if (shape.deformers?.length) {
+            transforms = createSplatTransformRuntime(mesh);
+            const settings = project.scene.animation ?? defaultAnimation();
+            for (const frame of new Set([0, settings.start, project.editor.time * settings.fps])) {
+              transforms.prepare(shape.componentTransforms, shape.deformers, shape.scalarMasks, frame);
+            }
+          }
           const root = new THREE.Group(),
             preview = new THREE.Group(),
             box = new THREE.Box3Helper(new THREE.Box3(), 0x999999);
@@ -3339,8 +3412,10 @@ async function start() {
             mesh,
             box,
             assetId: asset.id,
+            transforms,
           });
         } catch (error) {
+          transforms?.dispose();
           mesh.dispose();
           throw error;
         }

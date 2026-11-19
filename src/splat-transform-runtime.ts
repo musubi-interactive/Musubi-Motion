@@ -1,13 +1,25 @@
 import { dyno, type SplatMesh } from "@sparkjsdev/spark";
 import { Box3, DataTexture, FloatType, Matrix4, Ray, RGBAFormat, Sphere, Vector3, type Raycaster } from "three";
 import type { SplatAppearanceRead } from "./splat-appearance-runtime.ts";
-import { componentTransformLookup, gaussianBounds, gaussianFactor, type SplatComponentTransforms } from "./splat-component-transforms.ts";
+import { componentTransformLookup, gaussianFactor, type SplatComponentTransforms } from "./splat-component-transforms.ts";
+import { evaluateSplatDeformers, type SplatDeformer } from "./splat-deformers.ts";
+import type { SplatScalarMask } from "./splat-masks.ts";
+
+const NO_DEFORMERS: readonly SplatDeformer[] = [];
+const NO_MASKS: readonly SplatScalarMask[] = [];
 
 /** One sparse RGBA32F row per edited original: four affine columns; c0.w
  * and c1.w store the low/high 16-bit source index words exactly. Tiling
  * keeps the texture within WebGL2 minimum dimension limits. */
 export function createSplatTransformRuntime(mesh: SplatMesh) {
   let value: SplatComponentTransforms | undefined, bound = false;
+  let prepared: {
+    component: SplatComponentTransforms | undefined;
+    deformers: readonly SplatDeformer[];
+    masks: readonly SplatScalarMask[];
+    frame: number;
+    compiled: SplatComponentTransforms | undefined;
+  } | undefined;
   let lookup = componentTransformLookup();
   let texture = new DataTexture(new Float32Array(4096), 1024, 1, RGBAFormat, FloatType);
   const sampler = dyno.dynoSampler2D(texture), count = dyno.dynoInt(0);
@@ -51,12 +63,28 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
   });
   mesh.covObjectModifiers = [...(mesh.covObjectModifiers ?? []), modifier];
   mesh.updateGenerator();
+  function prepare(component: SplatComponentTransforms | undefined, deformers = NO_DEFORMERS, masks = NO_MASKS, frame = 0) {
+    const sampleFrame = deformers.some(deformer => deformer.keys?.length) ? frame : 0;
+    const sourceMasks = deformers.some(deformer => deformer.maskId) ? masks : NO_MASKS;
+    if (prepared && prepared.component === component && prepared.deformers === deformers && prepared.masks === sourceMasks && prepared.frame === sampleFrame)
+      return prepared.compiled;
+    const source = mesh.extSplats ?? mesh.packedSplats;
+    const compiled = deformers.length ? evaluateSplatDeformers(deformers, sourceMasks, component, sampleFrame, (index, center) => {
+      const splat = source!.getSplat(index);
+      center.copy(splat.center);
+      return Math.max(splat.scales.x, splat.scales.y, splat.scales.z);
+    }) : component;
+    prepared = { component, deformers, masks: sourceMasks, frame: sampleFrame, compiled };
+    return compiled;
+  }
   return {
     modifier,
+    prepare,
     get value() { return value; },
     affine(index: number) { return lookup(index); },
-    update(next: SplatComponentTransforms | undefined) {
-      if (value === next) return;
+    update(component: SplatComponentTransforms | undefined, deformers = NO_DEFORMERS, masks = NO_MASKS, frame = 0) {
+      const next = prepare(component, deformers, masks, frame);
+      if (value === next) return false;
       value = next; lookup = componentTransformLookup(next);
       const data = new Float32Array(Math.max(1, Math.ceil((next?.records.length ?? 0) / 256)) * 4096);
       next?.records.forEach((record, row) => {
@@ -68,6 +96,7 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
       texture = new DataTexture(data, 1024, data.length / 4096, RGBAFormat, FloatType);
       texture.needsUpdate = true; sampler.value = texture; count.value = next?.records.length ?? 0;
       mesh.updateVersion();
+      return true;
     },
     setBound(next: boolean) {
       if (next === bound) return;
@@ -88,10 +117,17 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
       return result;
     },
     bounds(active: (index: number) => boolean) {
-      const result = new Box3();
+      const result = new Box3(), matrix = new Matrix4(), extent = new Vector3(), point = new Vector3();
       (mesh.extSplats ?? mesh.packedSplats)?.forEachSplat((index, center, scales, rotation, opacity) => {
-        if (active(index) && opacity * mesh.opacity >= mesh.minRaycastOpacity)
-          result.union(gaussianBounds(gaussianFactor(center, scales, rotation, lookup(index)), 2));
+        if (!active(index) || opacity * mesh.opacity < mesh.minRaycastOpacity) return;
+        matrix.compose(center, rotation, scales);
+        const affine = lookup(index);
+        if (affine) matrix.premultiply(affine);
+        const e = matrix.elements;
+        extent.set(Math.hypot(e[0], e[4], e[8]), Math.hypot(e[1], e[5], e[9]), Math.hypot(e[2], e[6], e[10])).multiplyScalar(2);
+        point.set(e[12], e[13], e[14]);
+        result.expandByPoint(point.add(extent));
+        result.expandByPoint(point.addScaledVector(extent, -2));
       });
       return result;
     },

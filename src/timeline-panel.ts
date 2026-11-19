@@ -7,6 +7,7 @@ import { icon } from "./ui.ts";
 export function mountTimeline(store: SceneStore, options: {
   getFrame(): number; setFrame(frame: number): void; setKey(): void;
   getSelection(): string[]; available(): boolean; onModeChange(): void;
+  deleteDeformerKeys?(): boolean;
 }) {
   const host = document.getElementById("timeline-panel")!;
   host.classList.add("timeline-editor");
@@ -15,7 +16,7 @@ export function mountTimeline(store: SceneStore, options: {
   host.querySelector(".animation-label")!.remove();
   const tools = document.createElement("div"); tools.className = "timeline-options";
   tools.innerHTML = `<label>Mode <select aria-label="Playback mode"><option value="animation">Animation</option><option value="turntable">Turntable preview</option></select></label>
-    <button type="button" data-action="key" title="Key selected transforms and joints (S)">Set key · S</button>
+    <button type="button" data-action="key" title="Key the active selection (S)">Set key · S</button>
     <button type="button" data-action="delete">Delete keys at frame</button>
     <label><input type="checkbox" data-option="auto" /> Auto key</label>
     <label>Frame <input type="number" data-option="frame" aria-label="Current frame" step="1" /></label>
@@ -50,7 +51,7 @@ export function mountTimeline(store: SceneStore, options: {
       const direction = action.startsWith("previous") ? -1 : 1;
       if (action.endsWith("frame")) return options.setFrame(frame + direction);
       const selection = new Set(options.getSelection());
-      const frames = editingTracks(store.getState().document).filter(t => selection.has(t.targetId)).flatMap(t => t.keys.map(k => k.time))
+      const frames = selectionKeyFrames(selection)
         .filter(f => f >= settings.start && f <= settings.end && (direction < 0 ? f < frame : f > frame));
       options.setFrame(frames.length ? (direction < 0 ? Math.max(...frames) : Math.min(...frames)) : (direction < 0 ? settings.start : settings.end));
     });
@@ -64,9 +65,17 @@ export function mountTimeline(store: SceneStore, options: {
     if (!options.available()) return;
     try { action(); status.textContent = ""; } catch (error) { status.textContent = (error as Error).message; refresh(); }
   }
+  function selectionKeyFrames(selection: Set<string>) {
+    const doc = store.getState().document;
+    const frames = editingTracks(doc).filter(track => selection.has(track.targetId)).flatMap(track => track.keys.map(key => key.time));
+    for (const shape of Object.values(doc.nodes)) if (shape.type === "splatShape" && selection.has(shape.parentId))
+      for (const deformer of shape.deformers ?? []) for (const key of deformer.keys ?? []) frames.push(key.frame);
+    return frames;
+  }
   mode.onchange = () => run(options.onModeChange);
   tools.querySelector<HTMLButtonElement>('[data-action="key"]')!.onclick = () => run(options.setKey);
   tools.querySelector<HTMLButtonElement>('[data-action="delete"]')!.onclick = () => run(() => {
+    if (options.deleteDeformerKeys?.()) return;
     const selection = new Set(options.getSelection());
     const ids = editingTracks(store.getState().document).filter(t => selection.has(t.targetId))
       .flatMap(t => t.keys.filter(k => k.time === Math.round(options.getFrame())).map(k => k.id)) ?? [];
@@ -120,7 +129,7 @@ export function mountTimeline(store: SceneStore, options: {
     markers.replaceChildren();
     if (!turntable) {
       const selected = new Set(options.getSelection());
-      const frames = new Set(editingTracks(store.getState().document).filter(t => selected.has(t.targetId)).flatMap(t => t.keys.map(k => k.time)));
+      const frames = new Set(selectionKeyFrames(selected));
       for (const frame of [...frames].sort((a, b) => a - b)) if (frame >= settings.start && frame <= settings.end) {
         const button = document.createElement("button"); button.type = "button";
         button.title = `Go to key at frame ${frame}`; button.setAttribute("aria-label", button.title);
