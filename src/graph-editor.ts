@@ -7,7 +7,7 @@ import {
   defaultAnimation, evaluateCurve, tangentSlope, upsertTrack, deleteKeys, moveKeys,
   patchKeys, replaceTracks, copyKeys, pasteKeys,
   validateCurveKeys, scaleKeys, withTangent, insertKey, setKeys, channelsForTarget,
-  evaluateSceneAnimation, readChannel, editingTracks,
+  evaluateSceneAnimation, readChannel, editingTracks, morphChannelLabel,
 } from "./animation.ts";
 import type { AnimationTrack, CurveKey, AnimationPose } from "./animation.ts";
 import type { SceneDocument } from "./scene-document.ts";
@@ -168,7 +168,14 @@ function mountCurveEditors<Clipboard>(store: SceneStore, options: EditorOptions,
   const objectName = (id: string) => {
     const doc = store.getState().document; return doc.nodes[id]?.name ?? doc.joints?.find(j => j.id === id)?.name ?? doc.ikHandles?.find(handle => handle.id === id)?.name ?? id;
   };
-  const channelName = (track: AnimationTrack) => track.channel.startsWith("deformer.") ? deformerTrackRows(store.getState().document).get(track.id)?.label ?? track.channel : track.channel === "ik.blend" ? "IK blend" : channelLabel(store.getState().document, track.targetId, track.channel) + (isCustomChannel(track.channel) ? ` (${attributeTypeLabel(customAttribute(store.getState().document, track.targetId, track.channel))})` : "");
+  function channelName(track: AnimationTrack) {
+    const doc = store.getState().document;
+    if (track.channel.startsWith("deformer.")) return deformerTrackRows(doc).get(track.id)?.label ?? track.channel;
+    if (track.channel.startsWith("morph.")) return morphChannelLabel(doc, track.targetId, track.channel);
+    if (track.channel === "ik.blend") return "IK blend";
+    const label = channelLabel(doc, track.targetId, track.channel);
+    return isCustomChannel(track.channel) ? `${label} (${attributeTypeLabel(customAttribute(doc, track.targetId, track.channel))})` : label;
+  }
   function trackLabel(track: AnimationTrack) {
     const relation = isDriven ? store.getState().document.drivenKeys?.find(item => item.id === track.id) : undefined;
     return relation ? `${objectName(relation.driver.targetId)}.${channelLabel(store.getState().document, relation.driver.targetId, relation.driver.channel)} → ${objectName(relation.driven.targetId)}.${channelLabel(store.getState().document, relation.driven.targetId, relation.driven.channel)}`

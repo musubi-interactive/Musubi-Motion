@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { baseChannels, defaultAnimation, evaluateSceneAnimation, writeChannel } from "../src/animation.ts";
+import { baseChannels, defaultAnimation, morphChannelLabel, evaluateSceneAnimation, writeChannel } from "../src/animation.ts";
 import { prepareTransformAnimationEdit } from "../src/animation-edit.ts";
 import { createMeshPrimitive, findMeshShape } from "../src/mesh-modeling.ts";
 import { createSceneStore } from "../src/scene-store.ts";
@@ -69,4 +69,16 @@ it("shows new static blend shape edits while retaining an unkeyed transform draf
   expect(displayed.morphWeights).not.toBe(evaluated.morphWeights);
   expect(draft.morphWeights).toEqual([.2]);
   expect(applyTransformPoseDraft({ ...evaluated, morphWeights: undefined }, draft).morphWeights).toBeUndefined();
+});
+
+
+it("names facial curves by mesh or converted splat target and retains the channel index", () => {
+  const { doc, target } = fixture();
+  expect(morphChannelLabel(doc, target, "morph.0")).toBe("Smile (morph.0)");
+  const shape = findMeshShape(doc, target)!;
+  const converted = { ...doc, nodes: { ...doc.nodes, [shape.id]: {
+    type: "splatShape" as const, id: shape.id, name: "Face", parentId: target, assetId: "face", offset: [0,0,0] as [number,number,number],
+    morphTargets: [{ name: "Smile left", weight: 0 }, { name: "Smile left", weight: 0 }],
+  } } };
+  expect(morphChannelLabel(converted, target, "morph.1")).toBe("Smile left (morph.1)");
 });

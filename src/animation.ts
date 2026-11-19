@@ -44,6 +44,10 @@ function morphDefaults(doc: SceneDocument, id: string) {
   }
   return shapes.get(id);
 }
+export function morphChannelLabel(doc: SceneDocument, targetId: string, channel: string) {
+  const name = morphDefaults(doc, targetId)?.morphTargets?.[Number(channel.slice(6))]?.name;
+  return name ? `${name} (${channel})` : channel;
+}
 export type KeyClipboard = { tracks: AnimationTrack[]; origin: number };
 
 export function defaultAnimation(): AnimationData {
