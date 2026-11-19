@@ -171,6 +171,7 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
     },
     async prepareInteractive(component: SplatComponentTransforms | undefined, deformers: readonly SplatDeformer[] | undefined,
       masks: readonly SplatScalarMask[] | undefined, frame: number, morph: SplatMorphPose | undefined, signal: AbortSignal) {
+      signal.throwIfAborted();
       const next = pose(component, deformers, masks, frame, morph);
       if (cached(next)) return;
       const job = compile(next);
@@ -183,7 +184,7 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
         } while (performance.now() < deadline);
         // scheduler.yield gives input and rendering a turn even during continuous scrubs.
         const scheduler = (globalThis as { scheduler?: { yield(): Promise<void> } }).scheduler;
-        if (scheduler) await scheduler.yield();
+        if (scheduler?.yield) await scheduler.yield();
         else await new Promise(resolve => setTimeout(resolve, 0));
       } while (true);
     },
@@ -287,6 +288,7 @@ export function createSplatTransformRuntime(mesh: SplatMesh) {
       return nearest;
     },
     dispose() {
+      if (disposed) return;
       mesh.covObjectModifiers = mesh.covObjectModifiers?.filter(candidate => candidate !== modifier);
       disposed = true;
       current = previous = prepared = undefined;

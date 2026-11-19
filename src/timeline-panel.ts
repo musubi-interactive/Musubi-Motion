@@ -5,7 +5,7 @@ import "./timeline-panel.css";
 import { icon } from "./ui.ts";
 
 export function mountTimeline(store: SceneStore, options: {
-  getFrame(): number; setFrame(frame: number): void; setKey(): void;
+  getFrame(): number; navigationFrame(): number; setFrame(frame: number): void; setKey(): void;
   getSelection(): string[]; available(): boolean; onModeChange(): void;
   deleteDeformerKeys?(): boolean;
 }) {
@@ -46,7 +46,7 @@ export function mountTimeline(store: SceneStore, options: {
     if (action.startsWith("previous")) transport.insertBefore(button, document.getElementById("play")); else transport.append(button);
     button.onclick = () => run(() => {
       const settings = store.getState().document.animation ?? defaultAnimation();
-      const frame = Math.round(options.getFrame());
+      const frame = Math.round(options.navigationFrame());
       if (action === "end") return options.setFrame(settings.end);
       const direction = action.startsWith("previous") ? -1 : 1;
       if (action.endsWith("frame")) return options.setFrame(frame + direction);

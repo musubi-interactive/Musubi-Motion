@@ -464,6 +464,9 @@ async function start() {
     poseDrafts.capture(doc, poseOverrides);
     store.setState({ document: doc, editLabel: label });
   }
+  function navigationFrame() {
+    return pendingTime ? pendingTime.seconds * animationSettings().fps : getFrame();
+  }
   function cancelPendingTime() {
     pendingTime?.controller.abort();
     pendingTime = undefined;
@@ -1872,7 +1875,7 @@ async function start() {
     for (const id of assetFiles.keys())
       if (!retainedAssets.has(id)) assetFiles.delete(id);
   }
-  timelinePanel = mountTimeline(store, { getFrame, setFrame, setKey: keySelection, getSelection: animationSelection,
+  timelinePanel = mountTimeline(store, { getFrame, navigationFrame, setFrame, setKey: keySelection, getSelection: animationSelection,
     deleteDeformerKeys: () => deformerPanel?.deleteKeysAtFrame() ?? false,
     available: () => !loading && !dragId,
     onModeChange() { setPlaying(false); clearPoseDraft(); time = timelinePanel?.turntable ? 0 : animationSettings().start / animationSettings().fps; updateTime(); },
@@ -3069,6 +3072,11 @@ async function start() {
   });
   // A long scan must remain cancellable even if focus moves into an editor field.
   window.addEventListener("keydown", event => {
+    if (event.key === "Escape" && pendingTime) {
+      if (playing) setPlaying(false);
+      else cancelPendingTime();
+      updateTime(false);
+    }
     if (event.key === "Escape" && extractionRequest) {
       event.preventDefault();
       cancelSplatExtraction();
@@ -3153,7 +3161,7 @@ async function start() {
     // Let focused buttons receive their native Space activation.
     if (key === " " && event.composedPath().some(target => target instanceof HTMLButtonElement)) return;
     if (key === " ") { event.preventDefault(); if (!loading && !dragId) setPlaying(!playing); return; }
-    if (key === "," || key === ".") { event.preventDefault(); setFrame((pendingTime ? pendingTime.seconds * animationSettings().fps : getFrame()) + (key === "," ? -1 : 1)); return; }
+    if (key === "," || key === ".") { event.preventDefault(); setFrame(navigationFrame() + (key === "," ? -1 : 1)); return; }
     if (key === "delete") {
       if (loading || dragId) return;
       event.preventDefault();
@@ -3173,7 +3181,6 @@ async function start() {
       return;
     }
     if (key === "escape") {
-      if (pendingTime) { cancelPendingTime(); updateTime(false); }
       abortDrag();
       cancelSelection();
       selectObjects([]);
