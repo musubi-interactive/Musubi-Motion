@@ -99,7 +99,7 @@ export function createSplatPaintPanel(options: Options) {
   number("Brush Radius (px)", "radius", 1, 512, 1);
   number("Brush Strength", "strength", 0, 1, .01);
   select("Falloff", "falloff", () => [["constant", "Constant"], ["linear", "Linear"], ["smooth", "Smooth"]]);
-  select("Occlusion", "depth", () => [["front", "Front Centers"], ["through", "Through"]]);
+  select("Occlusion", "depth", () => [["scene-visible","Scene visible"], ["front", "Front Centers"], ["through", "Through"]]);
   select("Scalar Mask", "maskId", () => [["", "Whole Object"], ...(options.context()?.shape.scalarMasks ?? []).map(mask => [mask.id, mask.name] as const)]);
   const selected = document.createElement("input"); selected.type = "checkbox"; selected.onchange = () => apply({ selectedOnly: selected.checked });
   row("Selected Splats Only", selected);

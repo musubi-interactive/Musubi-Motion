@@ -1,11 +1,14 @@
+import { createWeightCleanupPanel } from "./skin-weight-cleanup-panel.ts";
+import type { CleanupContext } from "./skin-weight-smoothing.ts";
 import { addSkinInfluence, removeSkinInfluence } from "./skin-influences.ts";
 import { editSkinWeight, resetSkinWeights, MAX_WEIGHT_EDIT_COMPONENTS, type SkinInfluence } from "./skin-weights.ts";
 import type { SplatShapeNode } from "./scene-document.ts";
 import type { SceneStore } from "./scene-store.ts";
 
 type Components = { count: number; getWeights: (index: number) => SkinInfluence[] };
-type Preview = { shapeId: string; indices: number[]; jointId: string };
+type Preview = { values?: number[]; shapeId: string; indices: number[]; jointId: string };
 type Options = {
+  getCleanupContext?: (id: string) => CleanupContext | undefined;
   available: () => boolean;
   getSelection: () => string[];
   getComponents: (shapeId: string) => Components | undefined;
@@ -58,9 +61,13 @@ export function createSkinWeightsPanel(store: SceneStore, options: Options) {
   const details=group("Component weights");
   const summary=document.createElement("p");details.append(summary);
   const mode=document.createElement("select");mode.setAttribute("aria-label","Component selection mode");mode.add(new Option("Range","range"));mode.add(new Option("Viewport selection","viewport"));details.append(label("Selection mode",mode));
+  const pickDepth=document.createElement("select");pickDepth.setAttribute("aria-label","Skin selection depth");
+  for (const [name,id] of [["Scene visible","scene-visible"],["Front centers","front-centers"],["Through","through"]]) pickDepth.add(new Option(name,id));
+  details.append(label("Selection depth",pickDepth));
+  pickDepth.onchange = () => {stopPicking(); refresh();};
   const picking=document.createElement("input");picking.type="checkbox";
   const pickLabel=label("Select components in viewport",picking);pickLabel.className="weight-check";details.append(pickLabel);
-  const pickGuide=document.createElement("p");pickGuide.textContent="Click the nearest component center or drag an X-ray box. Shift adds; Ctrl subtracts; Escape cancels picking. Selection can include hidden components. Each selection supports up to 20,000 indices.";details.append(pickGuide);
+  const pickGuide=document.createElement("p");pickGuide.textContent="Click the nearest component center or drag a box using the selected depth mode. Shift adds; Ctrl subtracts; Escape cancels picking. Each selection supports up to 20,000 indices.";details.append(pickGuide);
   const clearSelection=button("Clear component selection",()=>run(()=>{mode.value="viewport";stopPicking();replaceSelection([]);},"Viewport component selection cleared."));details.append(clearSelection);
   const indexDetails=document.createElement("details"),indexSummary=document.createElement("summary");indexSummary.textContent="Selected component indices";
   const indexList=document.createElement("textarea");indexList.rows=4;indexList.readOnly=true;indexList.setAttribute("aria-label","Selected viewport component indices");indexDetails.append(indexSummary,indexList);details.append(indexDetails);
@@ -104,7 +111,8 @@ export function createSkinWeightsPanel(store: SceneStore, options: Options) {
   const total=document.createElement("p");details.append(total);
   const limits=document.createElement("p");limits.textContent="Edits affect every selected index, up to 20,000 components per operation. Range uses every index between its endpoints; Viewport selection uses only the selected indices and never falls back to a range. Viewport display samples at most 5,000 selected indices. The paused preview uses X-ray points visible through surfaces; it hides during playback, manipulation, or when Gizmos are hidden. Component selection and preview never change scene history. Weight 1 makes the selected joint the sole influence; unsupported fifth influences and invalid normalization are rejected.";
   const status=document.createElement("p");status.className="weight-status";status.setAttribute("role","status");status.setAttribute("aria-live","polite");
-  element.append(details,status,limits);
+  const cleanup = createWeightCleanupPanel(store, {shape:current, context:id=>options.getCleanupContext?.(id), targets:editIndices, joint:()=>influence.value, available:options.available, show:options.onPreview});
+  element.append(details,cleanup.element,status,limits);
   let shapeId="",rangeStart=0,rangeEnd=0,requestedWeight=1;
   let selectionSignature="",objectSignature="",influenceSignature="",inspectionSignature="",previewSignature="";
   let previousBinding:SplatShapeNode["binding"],previewBinding:SplatShapeNode["binding"];
@@ -211,10 +219,10 @@ export function createSkinWeightsPanel(store: SceneStore, options: Options) {
     const shape=shapes.find(shape=>shape.id===shapeId);
     if(!shape){shapeId="";stopPicking();if(componentSelection.length)replaceSelection([]);clearPreview(true);}
     objects.value=shapeId;palette.hidden=details.hidden=!shape;empty.hidden=!!shape;
-    for(const control of Array.from(element.querySelectorAll<HTMLInputElement|HTMLSelectElement|HTMLButtonElement>("input,select,button")))control.disabled=!available;
+    for(const control of Array.from(element.querySelectorAll<HTMLInputElement|HTMLSelectElement|HTMLButtonElement>("input,select,button")))if (!cleanup.element.contains(control)) control.disabled=!available;
     objects.disabled=!available||!shapes.length;
     if(!available)stopPicking();
-    if(!shape){previousBinding=undefined;return;}
+    if(!shape){previousBinding=undefined;cleanup.refresh();return;}
     if(previousBinding&&previousBinding!==shape.binding&&!shape.binding!.weights&&previousBinding.weights){stopPicking();clearPreview(true);}
     previousBinding=shape.binding;
     const nextInfluenceSignature=JSON.stringify([shape.id,shape.binding!.jointIds.map(id=>[id,doc.joints?.find(joint=>joint.id===id)?.name??id])]);
@@ -278,6 +286,8 @@ export function createSkinWeightsPanel(store: SceneStore, options: Options) {
     if(document.activeElement!==value)value.value=String(Number(requestedWeight.toFixed(6)));
     const samples=Math.min(PREVIEW_LIMIT,selectedCount);
     previewNote.textContent=`Paused X-ray preview: blue = 0, orange = 1 influence weight. ${samples.toLocaleString()}${samples<selectedCount?` evenly sampled indices of ${selectedCount.toLocaleString()}`:" component indices"}; the full component selection remains unchanged.`;
+    cleanup.refresh(shape, JSON.stringify([rangeStart,rangeEnd,mode.value,selectionRevision]));
+    if(cleanup.active) return;
     if(show.checked&&available&&validContext&&influence.value&&selectedCount){
       const signature=`${shape.id}/${mode.value}/${rangeStart}/${rangeEnd}/${selectionRevision}/${influence.value}`;
       if(signature!==previewSignature||previewBinding!==shape.binding){
@@ -295,5 +305,5 @@ export function createSkinWeightsPanel(store: SceneStore, options: Options) {
     }refresh();
   });
   refresh();
-  return {element,refresh,setComponentSelection,getComponentSelection:()=>mode.value==="viewport"?[...componentSelection]:[],stopPicking,resetScene};
+  return {element,refresh,getPickDepth:()=>pickDepth.value as import("./splat-component-selection.ts").SplatSelectionDepth,setComponentSelection,getComponentSelection:()=>mode.value==="viewport"?[...componentSelection]:[],stopPicking,resetScene};
 }

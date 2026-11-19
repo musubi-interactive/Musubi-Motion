@@ -1,7 +1,10 @@
 import { Matrix4, Vector4, WebGPUCoordinateSystem, type Camera } from "three";
 
 export type ComponentPickPoint = { x: number; y: number };
+export type SceneDepthTest = (u: number, v: number, cameraDepth: number) => boolean;
+export type SceneDepthReader = (cancelled: () => boolean) => Promise<SceneDepthTest>;
 export type ComponentProjectionOptions = {
+  readDepth?: SceneDepthReader;
   readPositions: (start: number, count: number) => Float32Array;
   componentCount: number;
   matrixWorld: Matrix4;
@@ -41,6 +44,8 @@ export async function scanProjectedComponents(
   // Snapshot once. Later camera/object changes cannot mix different projections in a scan.
   const view = new Matrix4().multiplyMatrices(options.camera.matrixWorldInverse, options.matrixWorld);
   const projection = options.camera.projectionMatrix.clone(), minimumDepth = options.camera.coordinateSystem === WebGPUCoordinateSystem ? 0 : -1;
+  const visible = options.readDepth ? await options.readDepth(options.cancelled ?? (() => false)) : undefined;
+  checkCancelled();
   const clip = new Vector4();
   const yieldTask = options.yieldTask ?? yieldToUI;
   for (let offset = 0; offset < componentCount; offset += CHUNK_SIZE) {
@@ -53,11 +58,13 @@ export async function scanProjectedComponents(
       if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
       clip.set(x, y, z, 1).applyMatrix4(view);
       if (clip.z > 0) continue; // Also excludes points behind orthographic cameras with negative near planes.
+      const cameraDepth = -clip.z;
       clip.applyMatrix4(projection);
       if (!Number.isFinite(clip.x) || !Number.isFinite(clip.y) || !Number.isFinite(clip.z) || !Number.isFinite(clip.w) || clip.w <= 0) continue;
       const ndcX = clip.x / clip.w, ndcY = clip.y / clip.w, depth = clip.z / clip.w;
       if (ndcX < -1 || ndcX > 1 || ndcY < -1 || ndcY > 1 || depth < minimumDepth || depth > 1) continue;
       const screenX = (ndcX + 1) * width / 2, screenY = (1 - ndcY) * height / 2, index = offset + local;
+      if (visible && !visible(screenX/width, screenY/height, cameraDepth)) continue;
       visit(index, screenX, screenY, depth);
     }
     if (offset + count < componentCount) {

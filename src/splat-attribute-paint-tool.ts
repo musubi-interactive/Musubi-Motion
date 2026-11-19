@@ -18,6 +18,7 @@ export type SplatPaintContext = {
   getPositions(indices: number[], front: boolean): Float32Array;
 };
 type Options = {
+  readDepth?: import("./component-picking.ts").SceneDepthReader;
   available(): boolean;
   context(): SplatPaintContext | undefined;
   camera(): Camera;
@@ -139,8 +140,9 @@ export function createSplatAttributePaintTool(canvas: HTMLCanvasElement, host: H
     options.busyChanged(); options.report("Indexing posed original splat centers. Press Escape to cancel.");
     let yielded = performance.now();
     active.ready = createSkinBrushIndex({
+      readDepth: captured.depth === "scene-visible" ? options.readDepth : undefined,
       componentCount: context.identity.count, projectedLimit: ATTRIBUTE_PAINT_LIMITS.source, frontCenters: captured.depth === "front",
-      readPositions(start, count) { return context.getPositions(Array.from({ length: count }, (_, i) => start + i), captured.depth === "front"); },
+      readPositions(start, count) { return context.getPositions(Array.from({ length: count }, (_, i) => start + i), captured.depth !== "through"); },
       matrixWorld: world, camera, width: rect.width, height: rect.height, cancelled: () => stroke !== active || active.cancelled(),
       yieldTask: async () => { if (performance.now() - yielded > 6) { await new Promise(resolve => setTimeout(resolve, 0)); yielded = performance.now(); } },
     }).then(index => {

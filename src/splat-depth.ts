@@ -208,6 +208,25 @@ export function createSplatDepthPass(renderer: THREE.WebGLRenderer, scene: THREE
     renderer.render(fullscreen, screenCamera);
   }
 
+  async function readPixels(camera: DepthCamera, signal: AbortSignal) {
+      const { width, height } = target;
+      const packed = new THREE.WebGLRenderTarget(width, height, { depthBuffer: false });
+      const previous = renderer.getRenderTarget(), face = renderer.getActiveCubeFace(), level = renderer.getActiveMipmapLevel();
+      try {
+        let readback: Promise<Uint8Array>;
+        try {
+          drawOutput(packed, camera, true, 1);
+          readback = readDepthBytes(renderer.getContext() as WebGL2RenderingContext, width, height, signal);
+        } finally {
+          renderer.setRenderTarget(previous, face, level);
+        }
+        const pixels = await readback;
+        signal.throwIfAborted();
+        return {pixels, width, height};
+      } finally {
+        packed.dispose();
+      }
+  }
   return {
     render(camera: DepthCamera, objects: Iterable<DepthObject>) {
       renderer.getDrawingBufferSize(canvasSize);
@@ -224,25 +243,11 @@ export function createSplatDepthPass(renderer: THREE.WebGLRenderer, scene: THREE
     get ready() {
       return !spark.sorting && !spark.sortDirty && spark.display === spark.current;
     },
+    readPixels,
     async capture(source: DepthCapture, signal: AbortSignal) {
-      const { width, height } = target;
       const camera = source.camera.clone();
-      const packed = new THREE.WebGLRenderTarget(width, height, { depthBuffer: false });
-      const previous = renderer.getRenderTarget(), face = renderer.getActiveCubeFace(), level = renderer.getActiveMipmapLevel();
-      try {
-        let readback: Promise<Uint8Array>;
-        try {
-          drawOutput(packed, camera, true, 1);
-          readback = readDepthBytes(renderer.getContext() as WebGL2RenderingContext, width, height, signal);
-        } finally {
-          renderer.setRenderTarget(previous, face, level);
-        }
-        const pixels = await readback;
-        signal.throwIfAborted();
-        return packageDepthImage(pixels, width, height, { ...source, camera });
-      } finally {
-        packed.dispose();
-      }
+      const {pixels, width, height} = await readPixels(camera, signal);
+      return packageDepthImage(pixels, width, height, { ...source, camera });
     },
     dispose() {
       target.dispose();
@@ -250,4 +255,35 @@ export function createSplatDepthPass(renderer: THREE.WebGLRenderer, scene: THREE
       shader.dispose();
     },
   };
+}
+
+/** Top-left normalized CSS sample against bottom-left packed linear GPU depth. */
+export function sceneDepthTest(pixels: Uint8Array, width: number, height: number) {
+  if (pixels.byteLength !== 4*width*height || !width || !height) throw Error("Invalid scene depth image.");
+  const data = new DataView(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+  return (u: number, v: number, cameraDepth: number) => {
+    if (!(u >= 0 && u < 1 && v >= 0 && v < 1 && cameraDepth > 0)) return false;
+    const x = Math.floor(u*width), y = height - 1 - Math.floor(v*height);
+    const surface = data.getFloat32(4*(y*width+x), true);
+    return surface > 0 && cameraDepth <= surface + Math.max(.0001, surface * .0005);
+  };
+}
+
+export async function readSceneSelectionDepth(renderer: THREE.WebGLRenderer, world: THREE.Scene, spark: SparkRenderer, camera: DepthCamera,
+  objects: () => Iterable<DepthObject>, cancelled: () => boolean) {
+  const pass = createSplatDepthPass(renderer, world, spark), controller = new AbortController();
+  const check = () => { if (cancelled()) controller.abort(); controller.signal.throwIfAborted(); };
+  const timer = setInterval(() => { if (cancelled()) controller.abort(); }, 12);
+  try {
+    const end = performance.now() + 8000;
+    for (;;) {
+      check();
+      pass.render(camera, objects());
+      if (pass.ready) break;
+      if (performance.now() > end) throw Error("Splats are still updating. Retry when the viewport settles or choose Through.");
+      await new Promise(resolve => setTimeout(resolve, 24));
+    }
+    const {pixels,width,height} = await pass.readPixels(camera, controller.signal);
+    check(); return sceneDepthTest(pixels,width,height);
+  } finally { clearInterval(timer); pass.dispose(); }
 }

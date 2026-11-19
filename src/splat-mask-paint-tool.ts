@@ -3,8 +3,9 @@ import { createSkinBrushIndex } from "./skin-weight-brush.ts";
 import { createSplatMaskStroke, validateSplatMaskBrush, type MaskPoint, type SplatMaskBrush } from "./splat-mask-brush.ts";
 import { maskLocked, maskValue, SPLAT_MASK_LIMITS, type SplatScalarMask, type SplatMaskValues } from "./splat-masks.ts";
 import { createSplatMaskPreview, SPLAT_MASK_PREVIEW_LIMIT } from "./splat-mask-preview.ts";
-export type SplatMaskPaintContext = { identity: object; mesh: Object3D; count: number; mask: SplatScalarMask; getPositions(indices: number[]): Float32Array; selected: Uint32Array };
+export type SplatMaskPaintContext = { identity: object; mesh: Object3D; count: number; mask: SplatScalarMask; getPositions(indices: number[], visible?: boolean): Float32Array; selected: Uint32Array };
 type Options = {
+  readDepth?: import("./component-picking.ts").SceneDepthReader;
   available(): boolean; getContext(shapeId: string, maskId: string): SplatMaskPaintContext | undefined; getCamera(): Camera; getRevision(): number;
   getDisplay(): { shapeId: string; maskId: string; show: boolean } | undefined;
   commit(settings: SplatMaskBrush, values: SplatMaskValues): void; onBusyChange(): void; onMessage(message: string): void; onResize(radius: number): void;
@@ -72,8 +73,8 @@ export function createSplatMaskPaintTool(canvas: HTMLCanvasElement, host: HTMLEl
     session = active; canvas.setPointerCapture(e.pointerId); active.segments.push([active.last, active.last]); options.onBusyChange(); options.onMessage("Indexing posed original splat centers… Escape cancels.");
     const selected = settings.selectedOnly ? new Set(context.selected) : undefined;
     let yielded = performance.now();
-    active.ready = createSkinBrushIndex({ componentCount: context.count, projectedLimit: SPLAT_MASK_LIMITS.projected,
-      readPositions(start, count) { const ids = Array.from({ length: count }, (_, i) => start + i), positions = context.getPositions(ids); if (selected) ids.forEach((id, i) => { if (!selected.has(id)) positions.fill(NaN, i * 3, i * 3 + 3); }); return positions; },
+    active.ready = createSkinBrushIndex({ readDepth: settings.depth === "scene-visible" ? options.readDepth : undefined, frontCenters: settings.depth === "front", componentCount: context.count, projectedLimit: SPLAT_MASK_LIMITS.projected,
+      readPositions(start, count) { const ids = Array.from({ length: count }, (_, i) => start + i), positions = context.getPositions(ids, settings.depth === "scene-visible" || settings.depth === "front"); if (selected) ids.forEach((id, i) => { if (!selected.has(id)) positions.fill(NaN, i * 3, i * 3 + 3); }); return positions; },
       matrixWorld: world, camera, width: rect.width, height: rect.height, cancelled: active.cancelled,
       yieldTask: async () => { if (performance.now() - yielded > 6) { await new Promise<void>(resolve => setTimeout(resolve, 0)); yielded = performance.now(); } },
     }).then(index => { if (!valid(active)) return; active.stroke = createSplatMaskStroke(index, settings, id => maskValue(context.mask, id), id => maskLocked(context.mask, id)); for (const pair of active.segments) active.stroke.addSegment(...pair); active.segments.length = 0; queuePreview(active); }).catch(error => fail(active, error));

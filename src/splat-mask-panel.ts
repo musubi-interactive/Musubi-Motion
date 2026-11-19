@@ -61,6 +61,10 @@ export function createSplatMaskPanel(store: SceneStore, options: Options) {
     numbers.push({ input, key, refresh: lock }); brush.append(row); return input;
   }
   brush.append(label("Operation", operation), label("Falloff", falloff)); number("Mask brush radius (px)", "radius", 1, 512, 1); number("Mask brush strength", "strength", 0, 1, .01); number("Mask brush value", "value", 0, 1, .01);
+  const depth = select("Mask brush occlusion", [["scene-visible","Scene visible"],["front","Front centers"],["through","Through"]]);
+  settings.depth = "scene-visible";
+  depth.onchange = () => updateSettings({ depth: depth.value as SplatMaskBrush["depth"] });
+  brush.append(label("Occlusion", depth));
   const selectedOnly = check("Paint selected components only"); brush.append(selectedOnly.row);
   const paint = button("Start painting mask", () => { const ctx = currentMask(); if (ctx.mask.locked) throw Error("Unlock this mask layer first."); const next = !painting; options.onPaint(next ? { ...settings, shapeId: ctx.identity.shapeId, maskId } : undefined); painting = next; refresh(); });
   const flood = button("Flood all original IDs", () => { const ctx = currentMask(); updateSplatMask(store, ctx.identity, maskId, "Flood splat scalar mask", mask => transformMask(mask, "flood", settings.mode === "erase" ? 0 : settings.value)); });

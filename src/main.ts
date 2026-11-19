@@ -143,6 +143,9 @@ import { createTerminal } from "./terminal-panel.ts";
 import { elasticityDefaults, elasticEdges, validateElasticity } from "./elasticity";
 import { createElasticityPanel } from "./elasticity-panel";
 import { mountViewportTools, type ViewName } from "./viewport-tools";
+import { commitWeightRows } from "./skin-weights.ts";
+import type { CleanupContext } from "./skin-weight-smoothing.ts";
+import { readSceneSelectionDepth } from "./splat-depth.ts";
 import { createSplatDepthPanel } from "./splat-depth-panel.ts";
 import { createRiggingPanel, mountRiggingPanel } from "./rigging-panel.ts";
 const riggingPanel = createRiggingPanel();
@@ -381,7 +384,7 @@ async function start() {
       object.mesh, object.polygon.triangleFaceIds, meshComponentRequest.mode, preview?.edgeIds ?? meshComponentIds);
     meshComponentPreview.setVisible(gizmosVisible && !playing && !loading);
   }
-  let weightPreview: { shapeId: string; indices: number[]; jointId: string } | undefined;
+  let weightPreview: { values?: number[]; shapeId: string; indices: number[]; jointId: string } | undefined;
   const weightOverlay = createSkinWeightPreview();
   let componentPickShape: string | undefined, componentPickEpoch = 0, pendingComponentPick: number | undefined;
   let splatComponent: SplatSelectionIdentity | undefined, splatComponentIds: Uint32Array = new Uint32Array();
@@ -500,7 +503,7 @@ async function start() {
     const shape = store.getState().document.nodes[weightPreview.shapeId];
     if (!entry || shape?.type !== "splatShape" || !shape.binding?.jointIds.includes(weightPreview.jointId)
       || weightPreview.indices.some(index => index < 0 || index >= entry.skin.componentCount)) { weightOverlay.clear(); return; }
-    const weights = weightPreview.indices.map(index => entry.skin.getWeights(index).find(influence => influence.jointId === weightPreview!.jointId)?.weight ?? 0);
+    const weights = weightPreview.values ?? weightPreview.indices.map(index => entry.skin.getWeights(index).find(influence => influence.jointId === weightPreview!.jointId)?.weight ?? 0);
     weightOverlay.update(entry.mesh, entry.skin.getComponentPositions(weightPreview.indices), weights);
   }
   function boundSelection(object:RuntimeObject) {
@@ -543,8 +546,8 @@ async function start() {
     const source = object.mesh.extSplats ?? object.mesh.packedSplats; if (!source) return;
     const binding = bindings.get(shape.id), count = binding?.skin.componentCount ?? source.numSplats;
     return { shape, object, identity: { shapeId: shape.id, assetId: shape.assetId, count }, selected: splatComponent?.shapeId === shape.id ? splatComponentIds : emptyMaskSelection,
-      getPositions(indices: number[]) {
-        const positions = binding ? binding.skin.getComponentPositions(indices, true) : object.transforms?.positions(indices) ?? readOriginalSplatPositions(object.mesh, indices);
+      getPositions(indices: number[], visible = false) {
+        const positions = binding ? binding.skin.getComponentPositions(indices, !visible) : object.transforms?.positions(indices, visible ? object.attributePaint ?? object.appearance : undefined) ?? readOriginalSplatPositions(object.mesh, indices);
         if (object.edits) indices.forEach((index, offset) => { if (!object.edits!.active(index)) positions.fill(NaN, offset * 3, offset * 3 + 3); });
         return positions;
       } };
@@ -614,7 +617,7 @@ async function start() {
     try {
       cancelComponentScan(); scan = splatScanSnapshot(); if (!scan) return;
       const options = { componentCount: scan.context.count, readPositions: (offset: number, count: number) => scan!.context.getPositions(Array.from({ length: count }, (_, index) => offset + index)),
-        matrixWorld: scan.meshWorld, camera: scan.cameraRef, width: scan.rect.width, height: scan.rect.height, depth: splatSelectionDepth, cancelled: scan.cancelled };
+        matrixWorld: scan.meshWorld, camera: scan.cameraRef, width: scan.rect.width, height: scan.rect.height, depth: splatSelectionDepth, readDepth: splatSelectionDepth === "scene-visible" ? readSceneDepth : undefined, cancelled: scan.cancelled };
       const settings = structuredClone(splatSoftSettings);
       const hits = region.tool === "sphere" ? await selectSplatSphere(options, settings) : await selectSplatRadial(options, region.center!, settings);
       if (scan.cancelled()) throw new DOMException("Falloff scan cancelled; previous weights unchanged.", "AbortError");
@@ -870,7 +873,7 @@ async function start() {
     for (let parent: THREE.Object3D | null = context.object.mesh; parent; parent = parent.parent) visible &&= parent.visible;
     splatPreview.points.visible = visible && !splatPaintTool?.active && splatComponentIds.length > 0;
     if (!splatDrag && !splatTransformPreview) refreshGizmo();
-    selectionLabel.textContent = `${splatComponentIds.length.toLocaleString()} / ${context.activeCount.toLocaleString()} splats selected${splatComponentIds.length > 20_000 ? " · 20,000 sampled highlights" : ""} · ${splatSelectionDepth === "through" ? "Through" : "Front centers"}`;
+    selectionLabel.textContent = `${splatComponentIds.length.toLocaleString()} / ${context.activeCount.toLocaleString()} splats selected${splatComponentIds.length > 20_000 ? " · 20,000 sampled highlights" : ""} · ${splatSelectionDepth === "through" ? "Through" : splatSelectionDepth === "scene-visible" ? "Scene visible" : "Front centers"}`;
     showSplatRegion(); refreshSplatPanel();
   }
   function exitSplatComponents() {
@@ -1198,6 +1201,7 @@ async function start() {
   controls.enableDamping = true;
   const spark = new SparkRenderer({ renderer: webgl, accumExtSplats: true, covSplats: true });
   world.add(spark);
+  const readSceneDepth = (cancelled: () => boolean) => readSceneSelectionDepth(webgl, world, spark, camera, () => runtime.values(), cancelled);
   const depth = createSplatDepthPanel({
     menu: element<WaDropdown>("display-menu"), renderer: webgl, world, spark, objects: () => runtime.values(),
     getFrame: () => ({
@@ -2011,6 +2015,7 @@ async function start() {
   }
   element("animation-set-key").addEventListener("click", keySelection);
   store.subscribe((state, previous) => {
+    if (state.document !== previous.document) skinPoseVersion++;
     if (extractionRequest && extractionRequest.document !== state.document) cancelSplatExtraction("The scene changed during splat duplication.");
     customPreviews.clear();
     const attributeDraft = customDrafts.get(state.document);
@@ -2029,7 +2034,17 @@ async function start() {
     updateHistoryButtons();
     queueMicrotask(collectUnusedResources);
   });
+  function weightCleanupContext(shapeId: string): CleanupContext | undefined {
+    const shape = store.getState().document.nodes[shapeId], entry = bindings.get(shapeId);
+    if (!entry || shape?.type !== "splatShape" || !shape.binding) return;
+    const object = runtime.get(shape.parentId), source = entry.mesh.extSplats ?? entry.mesh.packedSplats;
+    if (!source || object?.kind !== "splat") return;
+    return { count: entry.skin.componentCount, getWeights: entry.skin.getWeights,
+      locked: new Set(shape.binding.lockedJointIds),
+      restPosition: index => object.edits && !object.edits.active(index) ? undefined : source.getSplat(index).center.toArray() as Vec3 };
+  }
   skinWeightsPanel = createSkinWeightsPanel(store, {
+    getCleanupContext: weightCleanupContext,
     getInfluenceRestMatrix: (shapeId, jointId) => {
       const shape = store.getState().document.nodes[shapeId];
       const object = shape?.parentId ? runtime.get(shape.parentId) : undefined;
@@ -2684,7 +2699,9 @@ async function start() {
     notice.textContent = "Selecting components… Esc cancels.";
     let lastYield = performance.now();
     try {
-      const indices = await pickProjectedComponents({
+      const depth = skinWeightsPanel?.getPickDepth() ?? "through";
+      const indices = await pickSplatComponents({
+        depth, readDepth: depth === "scene-visible" ? readSceneDepth : undefined,
         componentCount: entry.skin.componentCount,
         readPositions: (offset, count) => entry.skin.getComponentPositions(Array.from({ length: count }, (_, index) => offset + index)),
         matrixWorld: meshWorld, camera: cameraRef, width: rect.width, height: rect.height,
@@ -2697,7 +2714,8 @@ async function start() {
         },
       });
       if (cancelled()) throw new DOMException("Component selection canceled.", "AbortError");
-      skinWeightsPanel?.setComponentSelection(shapeId, indices, start.subtract ? "subtract" : start.additive ? "add" : "replace");
+      if (indices.length > 20000) throw Error("Select at most 20,000 skin components.");
+      skinWeightsPanel?.setComponentSelection(shapeId, Array.from(indices), start.subtract ? "subtract" : start.additive ? "add" : "replace");
       notice.textContent = `${skinWeightsPanel?.getComponentSelection().length.toLocaleString() ?? 0} skin components selected. Edit their weights in Skin Weights.`;
     } catch (error) {
       if (epoch === componentPickEpoch) notice.textContent = (error as Error).name === "AbortError"
@@ -2711,7 +2729,7 @@ async function start() {
       const options: ComponentProjectionOptions & { depth: SplatSelectionDepth } = { componentCount: scan.context.count,
         readPositions: (offset, count) => scan.context.getPositions(Array.from({ length: count }, (_, index) => offset + index)),
         matrixWorld: scan.meshWorld, camera: scan.cameraRef, width: scan.rect.width, height: scan.rect.height,
-        depth: splatSelectionDepth, cancelled: scan.cancelled };
+        depth: splatSelectionDepth, readDepth: splatSelectionDepth === "scene-visible" ? readSceneDepth : undefined, cancelled: scan.cancelled };
       const end = splatPointer(event, scan.rect), path = start.splatPath;
       if (path?.tool === "sphere" || path?.tool === "radial") {
         const center = { x: start.x - scan.rect.left, y: start.y - scan.rect.top }, distance = Math.hypot(end.x - center.x, end.y - center.y);
@@ -3721,21 +3739,25 @@ async function start() {
     updateTime();
   });
   skinPaintTool = createSkinWeightPaintTool(webgl.domElement, viewport, {
+    readDepth: readSceneDepth,
     available: () => !loading && !playing && !dragId,
     showPreview: () => gizmosVisible,
     getCamera: () => camera,
     getRevision: () => skinPoseVersion,
     getContext: shapeId => {
       const entry = bindings.get(shapeId);
-      return entry ? { identity: entry.skin, mesh: entry.mesh, count: entry.skin.componentCount,
+      return entry ? { cleanup: weightCleanupContext(shapeId), identity: entry.skin, mesh: entry.mesh, count: entry.skin.componentCount,
         getWeights: entry.skin.getWeights, getPositions: entry.skin.getComponentPositions } : undefined;
     },
-    commit: (settings, values, context) => editSkinWeightValues(store, settings.shapeId, values, settings.jointId,
-      { count: context.count, getWeights: context.getWeights }),
+    commit: (settings, values, context) => {
+      if (settings.mode === "smooth") commitWeightRows(store, settings.shapeId, context, new Map(values.map(v => [String(v.index),v.row!])), "Smooth skin weights");
+      else editSkinWeightValues(store, settings.shapeId, values, settings.jointId, context);
+    },
     onBusyChange: () => skinPaintPanel?.refresh(),
     onMessage: message => { notice.textContent = message; },
   });
   splatMaskPaintTool = createSplatMaskPaintTool(webgl.domElement, viewport, {
+    readDepth: readSceneDepth,
     available: () => !loading && !playing && !dragId,
     getCamera: () => camera, getRevision: () => skinPoseVersion,
     getContext(shapeId, maskId) {
@@ -3750,6 +3772,7 @@ async function start() {
     onResize: radius => splatMaskPanel?.resize(radius),
   });
   splatPaintTool = createSplatAttributePaintTool(webgl.domElement, viewport, {
+    readDepth: readSceneDepth,
     available: () => !loading && !playing && !dragId,
     context: selectedSplatPaintContext, camera: () => camera, revision: () => skinPoseVersion,
     preview(context, value) {
